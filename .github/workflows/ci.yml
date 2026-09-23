@@ -221,7 +221,7 @@ jobs:
       # request could actually do something about.
       - name: Dependency vulnerabilities — record
         if: ${{ !cancelled() }}
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: sbom
           scan-ref: build/reports/cyclonedx/bom.json
@@ -239,7 +239,7 @@ jobs:
           category: trivy-dependencies
 
       - name: Dependency vulnerabilities — gate
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: sbom
           scan-ref: build/reports/cyclonedx/bom.json
@@ -258,7 +258,7 @@ jobs:
       # a real deployment manifest lands in this repository.
       - name: Compose and container configuration (Trivy, advisory)
         if: ${{ !cancelled() }}
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: .
