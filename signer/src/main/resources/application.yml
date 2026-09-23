@@ -1,0 +1,51 @@
+spring:
+  application:
+    name: signer
+
+  datasource:
+    # Its own database — the signer must not be able to read custody tables.
+    url: jdbc:postgresql://localhost:5432/signer
+    username: postgres
+    password: postgres
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: signer
+      auto-offset-reset: earliest
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+
+# The signer has no signing endpoint. Actuator still needs a port for health
+# checks, kept off 8080 so both services can run on the laptop at once.
+server:
+  port: 8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+chain:
+  rpc-url: http://localhost:8545
+  chain-id: 31337
+
+signer:
+  # Stand-in for a KMS or HSM. Read from the environment so it never lands in
+  # git; a real deployment would fetch it from a vault at startup and the key
+  # itself would never leave the HSM at all.
+  master-key: ${SIGNER_MASTER_KEY:}
+  # Hot-wallet policy (M5): refuse anything above this in one transaction.
+  max-transaction-wei: "5000000000000000000" # 5 ETH
