@@ -2,6 +2,7 @@ package com.farzam.custody;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.farzam.custody.support.AbstractPostgresTest;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
@@ -9,42 +10,20 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * M0 acceptance test.
  *
- * <p>{@code @SpringBootTest} boots the entire application context, exactly as
- * {@code main()} would. If a bean is missing, a {@code @Value} has no property, or
- * Hibernate's {@code ddl-auto: validate} finds an entity that does not match the
- * schema, this test fails. It is the cheapest broad regression test you get.
+ * <p>{@code @SpringBootTest} boots the entire application context, exactly as {@code main()} would.
+ * If a bean is missing, a {@code @Value} has no property, or Hibernate's {@code ddl-auto: validate}
+ * finds an entity that does not match the schema, this test fails. It is the cheapest broad
+ * regression test you get, and from M1 on it is also the thing that catches an entity drifting away
+ * from its Flyway migration.
  *
- * <p>{@code @Testcontainers} + {@code @Container} start a throwaway Docker container
- * for the test class and stop it afterwards. {@code @ServiceConnection} is the part
- * that saves real work: it reads the container's randomly-assigned host port and
- * injects the JDBC URL, username and password into the context. No
- * {@code @DynamicPropertySource} boilerplate, and no clash with the Postgres from
- * docker-compose that may already be on 5432.
- *
- * <p>Why a real Postgres and not H2? Because this project depends on Postgres
- * behaviour that H2 does not have: {@code FOR UPDATE SKIP LOCKED}, {@code jsonb},
- * partial indexes, {@code numeric(78,0)}. A test against H2 would pass while
- * production broke.
- *
- * <p>The container is {@code static}, so one Postgres is shared by every test in the
- * class rather than started per test method.
+ * <p>The Postgres container comes from {@link AbstractPostgresTest}, shared with the ledger tests.
  */
 @SpringBootTest
-@Testcontainers
-class CustodyApiApplicationTests {
-
-    @Container
-    @ServiceConnection
-    @SuppressWarnings("resource") // Testcontainers closes it via the JUnit extension
-    static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:16");
+class CustodyApiApplicationTests extends AbstractPostgresTest {
 
     @Autowired
     private DataSource dataSource;

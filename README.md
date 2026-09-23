@@ -55,6 +55,55 @@ flowchart LR
 | `custody-api` | Clients, the double-entry ledger, withdrawals, the REST API. |
 | `signer` | Wallet keys. The only component that can sign. |
 
+## The ledger
+
+Every movement of money is one journal transaction whose entries sum to zero.
+Nothing outside `LedgerService.post` is allowed to touch `accounts.balance`.
+
+| Account type | Meaning | May go negative |
+| --- | --- | --- |
+| `CLIENT` | What the bank owes one client | no |
+| `PENDING_OUT` | Funds held for withdrawals that are not final yet | no |
+| `BANK_OPERATING` | The bank's own funds, used to pay network fees | no |
+| `EXTERNAL` | The outside world | yes — that is the accounting |
+
+| Event | Entries |
+| --- | --- |
+| Deposit 1 ETH | EXTERNAL −1, CLIENT +1 |
+| Withdrawal requested (0.4) | CLIENT −0.4, PENDING_OUT +0.4 |
+| Withdrawal confirmed | PENDING_OUT −0.4, EXTERNAL +0.4 |
+| Withdrawal failed or rejected | PENDING_OUT −0.4, CLIENT +0.4 |
+| Network fee paid | BANK_OPERATING −fee, EXTERNAL +fee |
+
+Three properties hold, and each has a test rather than a comment:
+
+**Nothing unbalanced reaches the database.** `Posting` validates in its
+constructor, so an unbalanced set of entries cannot be constructed, never mind
+written. That makes the double-entry rule a type-level guarantee and lets it be
+tested without Postgres at all.
+
+**Concurrent spends cannot overdraw.** Fifty threads race to hold 0.1 ETH against
+an account holding 1 ETH; exactly ten succeed and the balance lands on zero. It
+runs twice, once against `SELECT … FOR UPDATE` and once against version-check-with-retry,
+because comparing two locking strategies where only one is tested is not comparing
+them. Delete the `for update` and the test does not merely fail — Postgres'
+`accounts_non_negative` check constraint throws, which is the point of having the
+constraint.
+
+**The same business event books once.** `unique (kind, reference_id)` plus
+`insert … on conflict do nothing` means a redelivered Kafka message is a no-op that
+returns the original transaction id, not a double spend. Idempotency is arbitrated
+by the unique index rather than by a look-up-then-insert, which has a gap two
+threads fit through.
+
+`accounts.balance` is a cache of the journal, and `LedgerService.recomputedBalanceOf`
+adds the entries back up so the tests can prove the two still agree.
+
+Why pessimistic locking, why the write path is plain SQL while reads go through
+JPA, and what was rejected:
+[ADR 0001](docs/adr/0001-pessimistic-row-locks-for-ledger-balances.md) and
+[ADR 0002](docs/adr/0002-the-ledger-writes-sql-and-reads-jpa.md).
+
 ## Running it
 
 Requires JDK 25 and Docker.
@@ -82,7 +131,7 @@ build is something you find before you push, not after.
 | Format | [Spotless](https://github.com/diffplug/spotless) (Eclipse JDT) | Anything `./gradlew spotlessApply` would change. |
 | Style | [Checkstyle](https://checkstyle.org/) | Naming, unused imports, swallowed exceptions, `System.out`, methods over 12 branches — and `float`/`double` anywhere, because wei is an exact integer. |
 | Bugs and SAST | [SpotBugs](https://spotbugs.github.io/) + [find-sec-bugs](https://find-sec-bugs.github.io/) | Null dereferences, resource leaks, SQL injection, weak crypto, predictable RNG. |
-| Coverage | [JaCoCo](https://www.jacoco.org/) | Line coverage below 50%. A floor that ratchets up per milestone, not a target. |
+| Coverage | [JaCoCo](https://www.jacoco.org/) | Line coverage below 85%. A floor that ratchets up per milestone, not a target. |
 | Secrets | [Gitleaks](https://github.com/gitleaks/gitleaks) | Credentials anywhere in history, with extra rules for Ethereum private keys and the signer master key. |
 | Dependencies | CycloneDX SBOM → [Trivy](https://trivy.dev/) | A new HIGH or CRITICAL CVE that has a released fix. |
 
@@ -123,7 +172,7 @@ Useful invocations:
 | | Milestone | What it demonstrates |
 | --- | --- | --- |
 | ✅ | **M0** Skeleton | Multi-module Gradle, Docker stack, Flyway-owned schema, Testcontainers |
-| ⬜ | **M1** Ledger | Double-entry posting, row locking, concurrency under 50 threads |
+| ✅ | **M1** Ledger | Double-entry posting, row locking, concurrency under 50 threads |
 | ⬜ | **M2** Withdrawal API | API-first OpenAPI contract, idempotency keys, RFC 9457 errors |
 | ⬜ | **M4** Outbox and Kafka | Transactional outbox, `SKIP LOCKED` relay, idempotent consumers, DLT |
 | ⬜ | **M5** Signer | Envelope encryption, nonce management, EIP-1559 signing and broadcast |
