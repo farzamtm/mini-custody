@@ -27,6 +27,14 @@ with a reversing entry, never an `UPDATE`, because the history is the audit
 trail. Funds are held at request time rather than at send time, so two
 concurrent withdrawals cannot both spend the same balance.
 
+**The API is written before the code.** `custody-api/src/main/resources/openapi.yaml`
+is the contract, and the build generates the Java interfaces the controllers
+implement — there is no `@GetMapping` anywhere in this repository. Change the
+contract and the controller stops compiling, which is the only version of "the docs
+match the code" that survives contact with a deadline. Every money-moving request
+carries an `Idempotency-Key` backed by a unique index, because a client that times
+out cannot tell whether its withdrawal happened and its only sane move is to retry.
+
 **Events go out through a transactional outbox.** Updating the database and
 publishing to Kafka are two systems with no shared transaction; doing them in
 sequence means a crash in between either loses the event or signs a withdrawal
@@ -104,6 +112,59 @@ JPA, and what was rejected:
 [ADR 0001](docs/adr/0001-pessimistic-row-locks-for-ledger-balances.md) and
 [ADR 0002](docs/adr/0002-the-ledger-writes-sql-and-reads-jpa.md).
 
+## The API
+
+[`openapi.yaml`](custody-api/src/main/resources/openapi.yaml) is the contract and it
+is written before the code. The build generates one Java interface per tag and the
+controllers implement them, so the two cannot drift: change a response type in the
+YAML and the controller stops compiling.
+
+| Method and path | Purpose | Success |
+| --- | --- | --- |
+| `POST /v1/withdrawals` | Request a withdrawal. Header `Idempotency-Key` required. | `202` + `Location` |
+| `GET /v1/withdrawals/{id}` | Current state and transaction hash | `200` |
+| `GET /v1/accounts/{id}` | Balance | `200` |
+| `POST /v1/clients/{id}/whitelist` | Allow a destination address | `201` |
+| `POST /dev/deposits` | Seed a balance. Mapped only under the `dev` profile. | `201` |
+
+**Amounts are strings.** A JSON number is a double in most parsers, which loses
+precision above 2^53; one ETH is 10^18 wei. Every amount in this API is a decimal
+integer string, in wei.
+
+**`202`, not `201`.** A withdrawal takes minutes — approvals, signing, three
+confirmations — so the request is recorded and the `Location` header says where to
+watch it. Holding an HTTP connection open for a slow business process is how you get
+a timeout in the middle of moving money.
+
+**Funds are held at request time.** `POST /v1/withdrawals` books
+`CLIENT −amount / PENDING_OUT +amount` in the same transaction that creates the
+withdrawal. Two concurrent requests against one balance therefore cannot both
+succeed; the second is refused immediately rather than failing later, when the
+signer reaches for money that is already spoken for.
+
+**Errors are RFC 9457 problem documents** with an added `code`, and clients should
+branch on the code rather than the status — three different things return `422`.
+
+```json
+{
+  "type": "about:blank",
+  "title": "Address not whitelisted",
+  "status": 422,
+  "detail": "the destination is not on this client's whitelist",
+  "code": "ADDRESS_NOT_WHITELISTED"
+}
+```
+
+What a problem document deliberately never contains: the balance behind an
+`INSUFFICIENT_FUNDS`, the idempotency key, the request a reused key first created, or
+a stack trace. There is no authentication on this API yet, so every error body is
+written as though a stranger is reading it.
+
+Why the contract generates the code, and why the idempotency key is enforced by a
+unique index rather than a look-up:
+[ADR 0003](docs/adr/0003-idempotency-keys-are-backed-by-a-unique-index.md) and
+[ADR 0004](docs/adr/0004-the-openapi-contract-generates-the-interfaces.md).
+
 ## Running it
 
 Requires JDK 25 and Docker.
@@ -113,6 +174,33 @@ docker compose up -d      # Postgres, Kafka (KRaft), Anvil
 ./gradlew build           # compiles and runs the tests
 ./gradlew :custody-api:bootRun
 ```
+
+`bootRun` starts with the `dev` profile, which is what maps `POST /dev/deposits` —
+a local instance with no way to put money into it is not much use. A real deployment
+sets its own profile and the endpoint's bean is never created, so the path simply
+does not exist.
+
+The whole flow, against a running instance:
+
+```bash
+CLIENT=$(uuidgen | tr 'A-Z' 'a-z')
+DEST=0x70997970c51812dc3a010c7d01b50e0d17dc79c8
+
+ACCOUNT=$(curl -s localhost:8080/dev/deposits -H 'Content-Type: application/json' \
+  -d "{\"clientId\":\"$CLIENT\",\"amountWei\":\"1000000000000000000\"}" | jq -r .id)
+
+curl -s localhost:8080/v1/clients/$CLIENT/whitelist -H 'Content-Type: application/json' \
+  -d "{\"address\":\"$DEST\"}"
+
+curl -s localhost:8080/v1/withdrawals -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d "{\"accountId\":\"$ACCOUNT\",\"destination\":\"$DEST\",\"amountWei\":\"400000000000000000\"}"
+
+curl -s localhost:8080/v1/accounts/$ACCOUNT   # 600000000000000000 — 0.4 is held
+```
+
+Send the third command twice with the same `Idempotency-Key` and the balance still
+reads 0.6: the retry returns the original withdrawal and holds nothing extra.
 
 Tests use [Testcontainers](https://testcontainers.com/), so they start their own
 throwaway Postgres and do not need the Compose stack running. A real Postgres
@@ -131,11 +219,21 @@ build is something you find before you push, not after.
 | Format | [Spotless](https://github.com/diffplug/spotless) (Eclipse JDT) | Anything `./gradlew spotlessApply` would change. |
 | Style | [Checkstyle](https://checkstyle.org/) | Naming, unused imports, swallowed exceptions, `System.out`, methods over 12 branches — and `float`/`double` anywhere, because wei is an exact integer. |
 | Bugs and SAST | [SpotBugs](https://spotbugs.github.io/) + [find-sec-bugs](https://find-sec-bugs.github.io/) | Null dereferences, resource leaks, SQL injection, weak crypto, predictable RNG. |
-| Coverage | [JaCoCo](https://www.jacoco.org/) | Line coverage below 85%. A floor that ratchets up per milestone, not a target. |
+| Coverage | [JaCoCo](https://www.jacoco.org/) | Line coverage below 90%. A floor that ratchets up per milestone, not a target. |
 | Secrets | [Gitleaks](https://github.com/gitleaks/gitleaks) | Credentials anywhere in history, with extra rules for Ethereum private keys and the signer master key. |
 | Dependencies | CycloneDX SBOM → [Trivy](https://trivy.dev/) | A new HIGH or CRITICAL CVE that has a released fix. |
 
-Two of those deserve a word on why they are configured the way they are.
+Three of those deserve a word on why they are configured the way they are.
+
+**Generated code is held to none of them.** `openapi-generator` emits
+`org.springframework.lang.Nullable`, which Spring Framework 7 deprecated, and puts
+its "do not edit" banner above the `package` line, which javac reads as a dangling
+doc comment — so its output cannot compile under `-Werror`, and neither problem is
+fixable from this repository. Relaxing the flags for the whole module would be the
+easy fix and the wrong one, since the warnings are worth most exactly where a human
+is typing. Instead the generated tree is a Gradle source set of its own, compiled
+with `-nowarn`; Checkstyle, SpotBugs and JaCoCo are all per-source-set and skip it
+for free. Nothing hand-written loses a gate.
 
 **The formatter is Eclipse JDT, not google-java-format.** Both
 google-java-format and palantir-java-format reach into
@@ -173,7 +271,7 @@ Useful invocations:
 | --- | --- | --- |
 | ✅ | **M0** Skeleton | Multi-module Gradle, Docker stack, Flyway-owned schema, Testcontainers |
 | ✅ | **M1** Ledger | Double-entry posting, row locking, concurrency under 50 threads |
-| ⬜ | **M2** Withdrawal API | API-first OpenAPI contract, idempotency keys, RFC 9457 errors |
+| ✅ | **M2** Withdrawal API | API-first OpenAPI contract, idempotency keys, RFC 9457 errors |
 | ⬜ | **M4** Outbox and Kafka | Transactional outbox, `SKIP LOCKED` relay, idempotent consumers, DLT |
 | ⬜ | **M5** Signer | Envelope encryption, nonce management, EIP-1559 signing and broadcast |
 | ⬜ | **M3** Approvals | Ed25519 four-eyes approval with amount-based quorum |

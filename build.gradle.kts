@@ -18,6 +18,10 @@ plugins {
     // Produces a CycloneDX SBOM of the resolved runtime classpath. CI feeds it
     // to Trivy: Gradle has no lockfile a scanner could read on its own.
     id("org.cyclonedx.bom") version "3.4.1"
+
+    // Turns custody-api/src/main/resources/openapi.yaml into the interfaces the
+    // controllers implement. Applied in the module that has a contract.
+    id("org.openapi.generator") version "7.14.0" apply false
 }
 
 // Bootstrap classes are not worth testing, and leaving them in the denominator
@@ -29,7 +33,8 @@ val coverageExclusions = listOf(
 // The floor, not the target. It ratchets up as milestones land; it exists so a
 // pull request cannot quietly delete tests. Override with `-PcoverageMinimum=0`.
 // M0: 0.50 (there was nothing to cover). M1: 0.85, with the ledger at 0.94.
-val coverageMinimum = BigDecimal((findProperty("coverageMinimum") ?: "0.85").toString())
+// M2: 0.90, with custody-api at 0.96.
+val coverageMinimum = BigDecimal((findProperty("coverageMinimum") ?: "0.90").toString())
 
 // Applied to the root project AND every module.
 allprojects {

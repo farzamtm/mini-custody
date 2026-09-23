@@ -1,0 +1,438 @@
+# The contract, and the source of the Java interfaces the controllers implement.
+#
+# This file is written before the code, not extracted from it. That ordering is
+# the whole point of "API-first": a contract that is generated from annotations
+# can only ever describe what was built, so it cannot be reviewed before it is
+# built, and a consumer cannot start against it. Here the Gradle build runs
+# `openApiGenerate` before `compileJava`, produces one interface per tag, and the
+# controllers implement them — so the implementation cannot drift from the
+# contract without failing to compile.
+#
+# OpenAPI 3.0.3 rather than 3.1: the generator's 3.1 support still has rough
+# edges around nullable types, and nothing here needs a 3.1 feature.
+openapi: 3.0.3
+
+info:
+  title: mini-custody
+  version: "1.0.0"
+  description: |
+    Custody of ETH: clients hold balances in a double-entry ledger, request
+    withdrawals, and approvers sign them off before an isolated signer service
+    puts a transaction on chain.
+
+    **Amounts are strings, always.** A JSON number is an IEEE 754 double in most
+    parsers, which loses precision above 2^53. One ETH is 10^18 wei, so every
+    amount in this API would be wrong. They are decimal integer strings in wei.
+
+    **There is no authentication yet.** This is a learning project; in production
+    every endpoint below would sit behind mTLS or OAuth and the client identity
+    would come from the credential rather than from the account being named in
+    the body.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: withdrawals
+    description: Requesting withdrawals and following their state.
+  - name: accounts
+    description: Reading ledger balances.
+  - name: clients
+    description: Per-client configuration, starting with the destination whitelist.
+  - name: dev
+    description: |
+      Only mapped under the `dev` Spring profile. These endpoints fabricate state
+      that would otherwise come from the chain, so that the withdrawal flow can be
+      exercised locally without waiting for a real deposit.
+
+paths:
+  /v1/withdrawals:
+    post:
+      tags: [withdrawals]
+      operationId: requestWithdrawal
+      summary: Request a withdrawal
+      description: |
+        Accepts the request, holds the funds, and returns immediately. The
+        withdrawal is not sent yet: it has to collect approvals, be signed, be
+        broadcast and be confirmed, which takes minutes. Hence `202` and a
+        `Location` header rather than a `201` — poll `GET /v1/withdrawals/{id}`.
+
+        Funds are held (moved from the client's account to `PENDING_OUT`) at
+        request time, not at send time. Two concurrent requests against the same
+        balance therefore cannot both succeed: the second one sees the money
+        already gone and fails with `INSUFFICIENT_FUNDS`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WithdrawalRequest'
+      responses:
+        '202':
+          description: |
+            Accepted, funds held. Also returned for a retry of a request that was
+            already accepted: the same key with the same body is the same
+            withdrawal, not a second one.
+          headers:
+            Location:
+              description: Where to poll for the current state.
+              schema:
+                type: string
+                format: uri
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Withdrawal'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: |
+            The idempotency key has been used before for a *different* request.
+            Reusing a key with new contents is a client bug, and guessing which
+            of the two was meant is not the server's place.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '503':
+          $ref: '#/components/responses/LedgerBusy'
+
+  /v1/withdrawals/{withdrawalId}:
+    get:
+      tags: [withdrawals]
+      operationId: getWithdrawal
+      summary: Current state of a withdrawal
+      parameters:
+        - name: withdrawalId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The withdrawal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Withdrawal'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/accounts/{accountId}:
+    get:
+      tags: [accounts]
+      operationId: getAccount
+      summary: Balance of a ledger account
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/clients/{clientId}/whitelist:
+    post:
+      tags: [clients]
+      operationId: whitelistAddress
+      summary: Allow a destination address for this client
+      description: |
+        A withdrawal may only go to an address on this list. The list is the
+        control that makes a compromised API client survivable: an attacker who
+        can call this API can still only move funds to somewhere the client
+        already declared, and adding an address is the slow, reviewable step.
+
+        Adding an address that is already listed succeeds and changes nothing.
+      parameters:
+        - name: clientId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WhitelistRequest'
+      responses:
+        '201':
+          description: The address is now whitelisted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WhitelistEntry'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /dev/deposits:
+    post:
+      tags: [dev]
+      operationId: simulateDeposit
+      summary: Credit a client account, as an on-chain deposit would
+      description: |
+        Books `EXTERNAL -amount / CLIENT +amount`, creating the client's account
+        if this is their first deposit. Mapped only under the `dev` profile.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DepositRequest'
+      responses:
+        '201':
+          description: Deposit booked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+components:
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        A value the client picks once per intended withdrawal and reuses on every
+        retry of it — a UUID is the obvious choice. A network timeout does not
+        tell the client whether the request arrived, and a blind retry of
+        "withdraw 1 ETH" against a chain that cannot reverse a transaction is how
+        money disappears. The key is what makes the retry safe.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 255
+
+  responses:
+    BadRequest:
+      description: The request is malformed or fails validation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: No such resource.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnprocessableEntity:
+      description: |
+        The request is well-formed but cannot be carried out: the address is not
+        whitelisted, the account does not exist or does not belong to a client,
+        or there is not enough money.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    LedgerBusy:
+      description: |
+        The ledger gave up retrying an optimistic lock conflict. Nothing is wrong;
+        the account is busier than the retry budget allows. Retry.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+
+    WithdrawalRequest:
+      type: object
+      required: [accountId, destination, amountWei]
+      properties:
+        accountId:
+          type: string
+          format: uuid
+          description: The client account to debit. Must be a `CLIENT` account.
+        destination:
+          type: string
+          description: |
+            Ethereum address, `0x` followed by 40 hex characters. Compared
+            case-insensitively against the whitelist, because EIP-55 checksums
+            differ only in case and a client should not be punished for sending
+            the checksummed form of an address they whitelisted in lower case.
+          pattern: '^0x[0-9a-fA-F]{40}$'
+          example: '0x70997970c51812dc3a010c7d01b50e0d17dc79c8'
+        amountWei:
+          $ref: '#/components/schemas/PositiveWei'
+
+    Withdrawal:
+      type: object
+      required: [id, clientId, accountId, destination, amountWei, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        clientId:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        destination:
+          type: string
+          example: '0x70997970c51812dc3a010c7d01b50e0d17dc79c8'
+        amountWei:
+          $ref: '#/components/schemas/PositiveWei'
+        status:
+          $ref: '#/components/schemas/WithdrawalStatus'
+        txHash:
+          type: string
+          nullable: true
+          description: The on-chain transaction hash. Null until the signer broadcasts.
+          example: '0x9f2a...'
+        failureReason:
+          type: string
+          nullable: true
+          description: Why the withdrawal ended in `REJECTED` or `FAILED`.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    WithdrawalStatus:
+      type: string
+      description: |
+        `PENDING_APPROVAL` → `APPROVED` → `BROADCAST` → `CONFIRMED` is the happy
+        path. `REJECTED` and `FAILED` release the held funds back to the client;
+        `CONFIRMED` settles them against `EXTERNAL`. All three are terminal.
+      enum:
+        - PENDING_APPROVAL
+        - APPROVED
+        - BROADCAST
+        - CONFIRMED
+        - REJECTED
+        - FAILED
+
+    Account:
+      type: object
+      required: [id, type, asset, balanceWei]
+      properties:
+        id:
+          type: string
+          format: uuid
+        clientId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for the system accounts, which belong to nobody.
+        type:
+          type: string
+          enum: [CLIENT, PENDING_OUT, BANK_OPERATING, EXTERNAL]
+        asset:
+          type: string
+          example: ETH
+        balanceWei:
+          type: string
+          description: |
+            Signed, because `EXTERNAL` is expected to be negative: it represents
+            the outside world, and its negation is what the hot wallet should hold
+            on chain.
+          pattern: '^-?[0-9]{1,78}$'
+          example: '400000000000000000'
+
+    WhitelistRequest:
+      type: object
+      required: [address]
+      properties:
+        address:
+          type: string
+          pattern: '^0x[0-9a-fA-F]{40}$'
+          example: '0x70997970c51812dc3a010c7d01b50e0d17dc79c8'
+
+    WhitelistEntry:
+      type: object
+      required: [clientId, address]
+      properties:
+        clientId:
+          type: string
+          format: uuid
+        address:
+          type: string
+          description: Stored and returned in lower case, whatever case it arrived in.
+          example: '0x70997970c51812dc3a010c7d01b50e0d17dc79c8'
+
+    DepositRequest:
+      type: object
+      required: [clientId, amountWei]
+      properties:
+        clientId:
+          type: string
+          format: uuid
+        amountWei:
+          $ref: '#/components/schemas/PositiveWei'
+
+    PositiveWei:
+      type: string
+      description: |
+        A strictly positive amount of wei, as a decimal integer string with no
+        leading zeros. 78 digits is 2^256, the largest value Ethereum can hold.
+      pattern: '^[1-9][0-9]{0,77}$'
+      example: '400000000000000000'
+
+    Problem:
+      type: object
+      description: |
+        RFC 9457 Problem Details, plus a `code`. The code is what a client should
+        branch on: `status` is too coarse (three different things return 422) and
+        `detail` is prose meant for a human reading a log.
+      properties:
+        type:
+          type: string
+          format: uri
+          example: about:blank
+        title:
+          type: string
+          example: Insufficient funds
+        status:
+          type: integer
+          example: 422
+        detail:
+          type: string
+          example: the account does not hold enough to cover this withdrawal
+        instance:
+          type: string
+          format: uri
+        code:
+          type: string
+          example: INSUFFICIENT_FUNDS
+        errors:
+          type: array
+          description: Field-level validation failures, present only on a 400.
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
