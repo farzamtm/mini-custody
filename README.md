@@ -91,11 +91,16 @@ Two of those deserve a word on why they are configured the way they are.
 **The formatter is Eclipse JDT, not google-java-format.** Both
 google-java-format and palantir-java-format reach into
 `com.sun.tools.javac.tree` internals that JDK 25 no longer exposes, so neither
-runs on this project's toolchain at all. Eclipse JDT has its own parser. It is
-configured in `config/spotless/eclipse-format.properties` to normalise
-indentation and spacing but never to rewrap a line or reflow a comment — in a
-codebase this heavily commented, a formatter with opinions about prose destroys
-more than the inconsistency it removes.
+runs on this project's toolchain at all. Eclipse JDT has its own parser.
+
+Stock Eclipse formatting is unpleasant, and one setting is the reason: its
+default wrapping is greedy, so an argument list that does not fit gets packed
+into a ragged block rather than broken one-per-line. Setting the three
+`alignment_for_*` keys in `config/spotless/eclipse-format.properties` to `48`
+(`M_ONE_PER_LINE_SPLIT`) is what google-java-format does by default, and with
+it the formatter reproduces this codebase's hand-written style byte for byte.
+Comment formatting is off entirely — code is fully canonical, prose is left to
+the author.
 
 **Security scanning is Trivy and find-sec-bugs rather than CodeQL**, because
 this repository is private and CodeQL needs GitHub Advanced Security. Trivy
