@@ -28,7 +28,8 @@ val coverageExclusions = listOf(
 
 // The floor, not the target. It ratchets up as milestones land; it exists so a
 // pull request cannot quietly delete tests. Override with `-PcoverageMinimum=0`.
-val coverageMinimum = BigDecimal((findProperty("coverageMinimum") ?: "0.50").toString())
+// M0: 0.50 (there was nothing to cover). M1: 0.85, with the ledger at 0.94.
+val coverageMinimum = BigDecimal((findProperty("coverageMinimum") ?: "0.85").toString())
 
 // Applied to the root project AND every module.
 allprojects {
@@ -148,6 +149,17 @@ subprojects {
         // private repository this is the SAST layer, since GitHub's CodeQL
         // needs Advanced Security.
         "spotbugsPlugins"("com.h3xstream.findsecbugs:findsecbugs-plugin:1.14.0")
+
+        // `@SuppressFBWarnings(value = ..., justification = ...)`. The exclude
+        // filter is for patterns that are wrong across the whole codebase; this
+        // is for the single line where the tool is wrong and the reason has to
+        // sit next to the code, where review will see it. compileOnly: it is an
+        // annotation the analyser reads, not something that ships. It is needed
+        // on the test classpath too: the annotation has CLASS retention, so
+        // javac reads it back out of the main class files when compiling tests
+        // and warns — fatally, under -Werror — if it cannot resolve it.
+        "compileOnly"("com.github.spotbugs:spotbugs-annotations:4.10.4")
+        "testCompileOnly"("com.github.spotbugs:spotbugs-annotations:4.10.4")
     }
 
     tasks.withType<com.github.spotbugs.snom.SpotBugsTask> {

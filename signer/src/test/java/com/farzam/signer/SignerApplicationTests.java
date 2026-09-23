@@ -34,8 +34,7 @@ class SignerApplicationTests {
 
     @Test
     void flywayCreatesEveryTable() throws Exception {
-        assertThat(publicTableNames())
-                .contains("wallet_keys", "chain_nonces", "signing_log", "processed_events")
+        assertThat(publicTableNames()).contains("wallet_keys", "chain_nonces", "signing_log", "processed_events")
                 .contains("flyway_schema_history");
     }
 

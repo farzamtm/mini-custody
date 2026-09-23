@@ -41,6 +41,15 @@ management:
       probes:
         enabled: true
 
+ledger:
+  # pessimistic = SELECT ... FOR UPDATE, optimistic = version check with retry.
+  # Both are implemented and both are tested; see docs/adr/0001 for why this is
+  # the default. Switching it changes only which BalanceUpdater bean is created.
+  locking: pessimistic
+  # How many times LedgerService re-runs a posting that lost an optimistic race
+  # before giving up. Dead weight under pessimistic locking, which never loses.
+  max-attempts: 50
+
 # Our own configuration, bound to a @ConfigurationProperties class later.
 chain:
   rpc-url: http://localhost:8545
