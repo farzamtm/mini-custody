@@ -1,0 +1,48 @@
+spring:
+  application:
+    name: custody-api
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/custody
+    username: postgres
+    password: postgres
+
+  jpa:
+    # Never let Hibernate create or alter tables. Flyway owns the schema;
+    # `validate` only checks that the entities match what Flyway built, and
+    # fails fast at startup if they have drifted.
+    hibernate:
+      ddl-auto: validate
+    # Close the persistence context at the end of the service call rather than
+    # the end of the HTTP request. Keeps lazy loading (and N+1 queries) out of
+    # the web layer, where you cannot see them.
+    open-in-view: false
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      # acks=all: the broker only acknowledges once every in-sync replica has
+      # the message. With idempotence on, producer retries cannot create
+      # duplicates. Both are the default in recent Spring Kafka, set explicitly
+      # because it is a decision, not an accident.
+      acks: all
+      properties:
+        enable.idempotence: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus
+  endpoint:
+    health:
+      # Exposes /actuator/health/liveness and /readiness, which is what
+      # Kubernetes probes use: liveness = restart me, readiness = don't route to me.
+      probes:
+        enabled: true
+
+# Our own configuration, bound to a @ConfigurationProperties class later.
+chain:
+  rpc-url: http://localhost:8545
+  chain-id: 31337
+  confirmations: 3

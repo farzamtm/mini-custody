@@ -1,0 +1,63 @@
+## Local infrastructure for mini-custody: Postgres, Kafka, Anvil.
+## Start with:  docker compose up -d
+## Check with:  docker compose ps   (all three should be "healthy")
+##
+## Nothing here is production configuration. Single broker, no replication,
+## no TLS, no auth, passwords in plain text. That is fine for a local
+## development stack and is called out in the README.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: custody
+    ports: ["5432:5432"]
+    # The two services share Kafka but NOT databases. One Postgres instance is
+    # enough locally, but they get separate logical databases so neither can
+    # read the other's tables — the signer's wallet_keys stay the signer's.
+    volumes:
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d custody"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  kafka:
+    image: apache/kafka:3.8.0 # runs KRaft single-node: broker + controller, no ZooKeeper
+    ports: ["9092:9092"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      # What the broker tells clients to connect back on. Apps run on the host,
+      # so this must be a host-reachable address, not the container name.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # One broker means nothing can be replicated more than once.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Don't wait 3s for other consumers that will never join.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    # --block-time 2 mines a block every 2s instead of one per transaction,
+    # so confirmation counting in M6 has something realistic to count.
+    entrypoint: ["anvil", "--host", "0.0.0.0", "--block-time", "2"]
+    ports: ["8545:8545"]
+    healthcheck:
+      test: ["CMD-SHELL", "cast block-number --rpc-url http://localhost:8545 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
