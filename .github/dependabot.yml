@@ -1,0 +1,58 @@
+# Dependabot keeps the dependency graph current so the CVE gate in CI has
+# something recent to compare against. Without it, `security` starts failing
+# one day for a CVE nobody was watching, on whichever pull request happens to
+# be open at the time.
+version: 2
+
+updates:
+  # ---- Gradle ---------------------------------------------------------------
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Amsterdam
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    groups:
+      # Spring Boot's modules move together; separate pull requests for each
+      # would all fail until the last one merged.
+      spring:
+        patterns:
+          - "org.springframework*"
+          - "io.spring*"
+      testing:
+        patterns:
+          - "org.testcontainers:*"
+          - "org.junit*"
+          - "org.assertj:*"
+          - "org.mockito:*"
+      # Everything else, batched by how risky the bump is.
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  # ---- GitHub Actions -------------------------------------------------------
+  # The actions in .github/workflows run with access to the repository; a stale
+  # one is as much a supply-chain risk as a stale library.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Amsterdam
+    labels: [dependencies, ci]
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # ---- Docker ---------------------------------------------------------------
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Amsterdam
+    labels: [dependencies, docker]

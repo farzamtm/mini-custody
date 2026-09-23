@@ -42,8 +42,7 @@ class SignerApplicationTests {
     private List<String> publicTableNames() throws Exception {
         var names = new ArrayList<String>();
         try (var connection = dataSource.getConnection();
-                ResultSet tables =
-                        connection.getMetaData().getTables(null, "public", "%", new String[] {"TABLE"})) {
+                ResultSet tables = connection.getMetaData().getTables(null, "public", "%", new String[] {"TABLE"})) {
             while (tables.next()) {
                 names.add(tables.getString("TABLE_NAME"));
             }

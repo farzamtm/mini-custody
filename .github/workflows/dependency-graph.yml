@@ -1,0 +1,45 @@
+# Submits the resolved Gradle dependency graph to GitHub.
+#
+# Why this is separate from ci.yml: GitHub can read a lockfile for npm or a
+# pom.xml for Maven, but Gradle resolves versions at build time, so without
+# this job the dependency graph is empty and Dependabot alerts never fire for
+# this repository. The Trivy gate in CI blocks a pull request that *introduces*
+# a vulnerable dependency; this is what tells us about a CVE published against
+# a dependency that was already there.
+#
+# main only: the graph should describe what is merged, and a pull request from
+# a fork cannot be given the write permission this needs.
+name: Dependency graph
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dependency-graph
+  cancel-in-progress: true
+
+jobs:
+  submit:
+    name: Submit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - uses: gradle/actions/dependency-submission@v6
+        with:
+          validate-wrappers: true
+          # Test-only dependencies are not shipped and not exploitable in
+          # production. Testcontainers alone drags in enough of Docker's client
+          # stack to bury the alerts that matter.
+          dependency-graph-exclude-configurations: ".*[Tt]est(Compile|Runtime)Classpath|checkstyle|spotbugs.*|spotless.*|jacoco.*"

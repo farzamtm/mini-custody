@@ -1,0 +1,73 @@
+# CodeQL: GitHub's own static analysis, deeper than find-sec-bugs because it
+# does whole-program dataflow — it can follow an HTTP request parameter through
+# three services into a SQL string, which a bytecode pattern matcher cannot.
+#
+# It lives in its own workflow rather than in ci.yml's `gate` job on purpose.
+# CodeQL's Java extractor tracks new language versions on its own schedule, and
+# this project compiles on a JDK that is newer than most. A day when the
+# extractor cannot parse a JDK 25 feature should show up as a failing CodeQL
+# check to investigate, not as a blocked merge for every pull request.
+#
+# Promote it into the required checks once it has been green for a few weeks:
+# the blocking SAST layer until then is find-sec-bugs, which runs in ci.yml.
+name: CodeQL
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Mondays, 05:00 UTC. New queries ship without the code changing, so a
+    # repository that only scans on push slowly stops being scanned.
+    - cron: "0 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze Java
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          validate-wrappers: true
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: java-kotlin
+          # `manual` means CodeQL watches the real Gradle compile below, so it
+          # sees exactly the classpath and generated sources the build sees.
+          build-mode: manual
+          # `security-extended` over the default suite: this is a system that
+          # signs transactions moving money, so a higher false-positive rate is
+          # a fair trade for the extra coverage.
+          queries: security-extended
+
+      - name: Build
+        run: ./gradlew compileJava compileTestJava --no-daemon
+
+      - name: Analyse
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:java-kotlin"
