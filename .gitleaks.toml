@@ -1,0 +1,47 @@
+# Gitleaks configuration.
+#
+# Starts from the tool's own rule set and adds what is specific to this
+# project. Two categories matter here that a generic scanner does not know
+# about: Ethereum private keys, and the signer's master encryption key.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "ethereum-private-key"
+description = "Ethereum private key (32 bytes, hex)"
+# 64 hex characters, optionally 0x-prefixed, not part of a longer hex run —
+# which is what distinguishes a key from a transaction hash in a log line.
+regex = '''(?i)\b(?:0x)?[0-9a-f]{64}\b'''
+keywords = ["0x", "privatekey", "private_key"]
+entropy = 3.5
+
+[[rules]]
+id = "signer-master-key"
+description = "Signer master encryption key"
+regex = '''(?i)(signer[_-]?master[_-]?key|master[_-]?key)\s*[:=]\s*['"]?[A-Za-z0-9+/=]{32,}'''
+keywords = ["master_key", "masterkey", "master-key"]
+
+[allowlist]
+description = "Paths and values that look like secrets but are not"
+
+paths = [
+  # Anvil's ten well-known development accounts. They are printed by the tool
+  # on every start and are public knowledge; treating them as secrets would
+  # train everyone to pass --no-verify.
+  '''docker-compose\.yml''',
+  '''docker/.*''',
+  # Gradle's wrapper jar is binary and its checksum is validated separately.
+  '''gradle/wrapper/gradle-wrapper\.jar''',
+  # This file necessarily contains patterns that match secrets.
+  '''\.gitleaks\.toml''',
+]
+
+regexes = [
+  # Anvil / Hardhat deterministic mnemonic and its derived key zero. Public.
+  '''test test test test test test test test test test test junk''',
+  '''0x?ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80''',
+  # The all-zero address and hash, used as sentinels.
+  '''0x0{40}''',
+  '''0x0{64}''',
+]

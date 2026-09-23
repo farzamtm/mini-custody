@@ -1,0 +1,294 @@
+# The merge gate.
+#
+# Three jobs run in parallel because they fail for different reasons and a
+# reviewer should see all three verdicts at once, not discover the second one
+# after fixing the first:
+#
+#   quality   — does the code compile cleanly, is it formatted, does static
+#               analysis object? No Docker, so it answers in about a minute.
+#   test      — does it actually work? Testcontainers means real Postgres, so
+#               this is the slow one.
+#   security  — secrets, dependency CVEs, container and compose misconfiguration.
+#
+# `gate` then collapses them into one check, so branch protection has a single
+# name to require rather than a list that has to be edited every time a job is
+# added.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Read-only by default. Any job needing more asks for it explicitly.
+permissions:
+  contents: read
+
+# A second push to the same pull request makes the first run irrelevant.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Matches the toolchain in build.gradle.kts. CI and a laptop must not compile
+  # against different JDKs.
+  JAVA_VERSION: "25"
+
+jobs:
+  # --------------------------------------------------------------------------
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          # Verifies gradle-wrapper.jar against Gradle's published checksums.
+          # A tampered wrapper jar is arbitrary code execution on every machine
+          # that builds the repository, and it is invisible in a diff.
+          validate-wrappers: true
+          # Only the main branch writes to the shared cache: a pull request
+          # cannot poison what later builds read.
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Compile with -Werror
+        run: ./gradlew compileJava compileTestJava --no-daemon
+
+      - name: Formatting (Spotless)
+        run: ./gradlew spotlessCheck --no-daemon
+
+      - name: Style (Checkstyle)
+        run: ./gradlew checkstyleMain checkstyleTest --no-daemon
+
+      - name: Bug patterns and SAST (SpotBugs + find-sec-bugs)
+        run: ./gradlew spotbugsMain --no-daemon
+
+      # The merge is already gated by the step above; this only puts the same
+      # findings in the Security tab, where they are readable and trackable.
+      # `continue-on-error` because a SARIF quirk must never be the reason a
+      # correct pull request cannot merge.
+      - name: Publish SpotBugs findings to code scanning
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: custody-api/build/reports/spotbugs/main.sarif
+          category: spotbugs-custody-api
+
+      - name: Publish SpotBugs findings to code scanning (signer)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: signer/build/reports/spotbugs/main.sarif
+          category: spotbugs-signer
+
+      - name: Upload analysis reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: quality-reports
+          path: |
+            **/build/reports/checkstyle/
+            **/build/reports/spotbugs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    # Testcontainers pulls images on a cold cache; 30 minutes is slack, not a
+    # target. If a run genuinely approaches it, something is hanging.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          validate-wrappers: true
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      # Testcontainers needs a Docker daemon. GitHub's ubuntu runners ship one,
+      # so this is a guard against a future runner change, not a setup step.
+      - name: Check Docker is available
+        run: docker info > /dev/null
+
+      - name: Test
+        run: ./gradlew test --no-daemon
+
+      - name: Coverage gate
+        run: ./gradlew jacocoTestReport jacocoTestCoverageVerification --no-daemon
+
+      - name: Coverage summary
+        if: ${{ !cancelled() }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, xml.etree.ElementTree as ET
+
+          print("### Coverage\n")
+          print("| Module | Lines | Branches |")
+          print("| --- | --- | --- |")
+
+          def pct(counters, kind):
+              c = counters.get(kind)
+              if not c:
+                  return "n/a"
+              covered, missed = c
+              total = covered + missed
+              return f"{covered / total:.1%} ({covered}/{total})" if total else "n/a"
+
+          for report in sorted(glob.glob("*/build/reports/jacoco/test/jacocoTestReport.xml")):
+              module = report.split("/")[0]
+              root = ET.parse(report).getroot()
+              counters = {
+                  c.get("type"): (int(c.get("covered")), int(c.get("missed")))
+                  for c in root.findall("counter")
+              }
+              print(f"| `{module}` | {pct(counters, 'LINE')} | {pct(counters, 'BRANCH')} |")
+          PY
+
+      - name: Upload test and coverage reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: |
+            **/build/reports/tests/
+            **/build/reports/jacoco/
+            **/build/test-results/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      # Gitleaks needs history to scan the commits a pull request adds, not
+      # just the final tree: a key that was committed and then deleted is
+      # still a leaked key.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Secret scan (Gitleaks)
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            detect --source=/repo --redact --verbose \
+            --config=/repo/.gitleaks.toml
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          validate-wrappers: true
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      # Gradle has no lockfile a scanner can read, so the build tells us what it
+      # actually resolved and Trivy reads that.
+      - name: Generate SBOM
+        run: ./gradlew cyclonedxBom --no-daemon
+
+      # Two passes over the same SBOM. The first records everything it finds,
+      # including CVEs with no fix available, so the Security tab shows the
+      # true picture. The second is the gate, and only fails on what a pull
+      # request could actually do something about.
+      - name: Dependency vulnerabilities — record
+        if: ${{ !cancelled() }}
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: sbom
+          scan-ref: build/reports/cyclonedx/bom.json
+          scanners: vuln
+          format: sarif
+          output: trivy-dependencies.sarif
+          exit-code: "0"
+
+      - name: Publish dependency findings to code scanning
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-dependencies.sarif
+          category: trivy-dependencies
+
+      - name: Dependency vulnerabilities — gate
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: sbom
+          scan-ref: build/reports/cyclonedx/bom.json
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          # A CVE with no released fix cannot be actioned by the pull request
+          # that happens to be open when it lands. Those stay visible in the
+          # Security tab and in Dependabot; only fixable ones block a merge.
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+
+      # Informational: docker-compose.yml is local development configuration
+      # with deliberately plain-text passwords, so a misconfiguration finding
+      # there is expected and must not block a merge. It becomes a gate the day
+      # a real deployment manifest lands in this repository.
+      - name: Compose and container configuration (Trivy, advisory)
+        if: ${{ !cancelled() }}
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+
+      - name: Upload SBOM
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: build/reports/cyclonedx/bom.json
+          retention-days: 90
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # One check to require in branch protection. It exists because
+  # `needs: [...]` alone would let a skipped job count as success.
+  gate:
+    name: Gate
+    runs-on: ubuntu-latest
+    needs: [quality, test, security]
+    if: ${{ always() }}
+    steps:
+      - name: Verify every job succeeded
+        run: |
+          echo "quality:  ${{ needs.quality.result }}"
+          echo "test:     ${{ needs.test.result }}"
+          echo "security: ${{ needs.security.result }}"
+          [ "${{ needs.quality.result }}"  = "success" ] \
+            && [ "${{ needs.test.result }}"     = "success" ] \
+            && [ "${{ needs.security.result }}" = "success" ] \
+            || { echo "::error::One or more CI jobs did not succeed."; exit 1; }

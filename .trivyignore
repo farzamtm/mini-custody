@@ -1,0 +1,12 @@
+# Accepted dependency vulnerabilities.
+#
+# Every line is CVE-ID, then a comment saying why it is accepted and when that
+# decision expires. An entry with no expiry is a permanent exception and needs
+# a reason that will still be true next year.
+#
+# Trivy already skips findings with no released fix (`ignore-unfixed: true` in
+# .github/workflows/ci.yml), so anything that reaches this file is something we
+# could upgrade away from and have chosen not to. That should be rare.
+#
+# Format:
+#   CVE-2000-0000 exp:2026-12-31   # why, and who decided

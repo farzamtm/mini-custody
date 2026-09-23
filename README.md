@@ -71,6 +71,53 @@ rather than H2, because the ledger depends on `FOR UPDATE SKIP LOCKED`, `jsonb`,
 partial indexes and `numeric(78,0)` — an H2 test would pass while production
 broke.
 
+## Quality gates
+
+`./gradlew check` runs locally exactly what CI runs on a pull request, so a red
+build is something you find before you push, not after.
+
+| Gate | Tool | What it rejects |
+| --- | --- | --- |
+| Compile | `javac -Xlint:all -Werror` | Any compiler warning. The cheapest analyser available, and off by default. |
+| Format | [Spotless](https://github.com/diffplug/spotless) (Eclipse JDT) | Anything `./gradlew spotlessApply` would change. |
+| Style | [Checkstyle](https://checkstyle.org/) | Naming, unused imports, swallowed exceptions, `System.out`, methods over 12 branches — and `float`/`double` anywhere, because wei is an exact integer. |
+| Bugs and SAST | [SpotBugs](https://spotbugs.github.io/) + [find-sec-bugs](https://find-sec-bugs.github.io/) | Null dereferences, resource leaks, SQL injection, weak crypto, predictable RNG. |
+| Coverage | [JaCoCo](https://www.jacoco.org/) | Line coverage below 50%. A floor that ratchets up per milestone, not a target. |
+| Secrets | [Gitleaks](https://github.com/gitleaks/gitleaks) | Credentials anywhere in history, with extra rules for Ethereum private keys and the signer master key. |
+| Dependencies | CycloneDX SBOM → [Trivy](https://trivy.dev/) | A new HIGH or CRITICAL CVE that has a released fix. |
+
+Two of those deserve a word on why they are configured the way they are.
+
+**The formatter is Eclipse JDT, not google-java-format.** Both
+google-java-format and palantir-java-format reach into
+`com.sun.tools.javac.tree` internals that JDK 25 no longer exposes, so neither
+runs on this project's toolchain at all. Eclipse JDT has its own parser.
+
+Stock Eclipse formatting is unpleasant, and one setting is the reason: its
+default wrapping is greedy, so an argument list that does not fit gets packed
+into a ragged block rather than broken one-per-line. Setting the three
+`alignment_for_*` keys in `config/spotless/eclipse-format.properties` to `48`
+(`M_ONE_PER_LINE_SPLIT`) is what google-java-format does by default, and with
+it the formatter reproduces this codebase's hand-written style byte for byte.
+Comment formatting is off entirely — code is fully canonical, prose is left to
+the author.
+
+**Security scanning is Trivy and find-sec-bugs rather than CodeQL**, because
+this repository is private and CodeQL needs GitHub Advanced Security. Trivy
+reads a CycloneDX SBOM that the build generates, since Gradle resolves versions
+at build time and leaves no lockfile a scanner could read on its own. Unfixable
+CVEs do not block a merge — a pull request cannot action an advisory with no
+patch — but they still show up in the CI log and in Dependabot.
+
+Useful invocations:
+
+```bash
+./gradlew check           # every gate above except the two that need Docker images
+./gradlew spotlessApply   # fix formatting rather than argue with it
+./gradlew cyclonedxBom    # writes build/reports/cyclonedx/bom.json
+./gradlew check -PcoverageMinimum=0   # temporarily ignore the coverage floor
+```
+
 ## Milestones
 
 | | Milestone | What it demonstrates |

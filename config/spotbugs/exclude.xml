@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SpotBugs exclusions.
+
+  Every entry here is a place where the tool is right about the general case
+  and wrong about this codebase. Anything that is merely inconvenient to fix
+  does not belong in this file — fix it instead, or suppress it at the single
+  line with @SuppressFBWarnings and a reason, where a reviewer will see it.
+-->
+<FindBugsFilter>
+
+    <!-- Spring's constructor injection hands beans their collaborators and
+         those collaborators are singletons owned by the container. SpotBugs
+         reads "field assigned from a constructor parameter" as a mutable-state
+         leak, which would flag essentially every Spring bean in the project. -->
+    <Match>
+        <Or>
+            <Bug pattern="EI_EXPOSE_REP"/>
+            <Bug pattern="EI_EXPOSE_REP2"/>
+        </Or>
+    </Match>
+
+    <!-- Spring Boot's entry point takes the args array by contract. -->
+    <Match>
+        <Class name="~.*Application"/>
+        <Bug pattern="MS_EXPOSE_REP"/>
+    </Match>
+
+    <!-- Flyway owns the schema and the migration files are checked into this
+         repository, so they are not attacker-controlled input. -->
+    <Match>
+        <Bug pattern="SQL_INJECTION_SPRING_JDBC"/>
+        <Class name="~.*Migration.*"/>
+    </Match>
+
+    <!-- Generated sources: nothing to fix, and the generator's style is not
+         ours to argue with. -->
+    <Match>
+        <Source name="~.*[\\/]generated[\\/].*"/>
+    </Match>
+
+</FindBugsFilter>
