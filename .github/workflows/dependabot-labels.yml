@@ -1,0 +1,83 @@
+# Labels a Dependabot pull request with the semver bump it is making, so that
+# "this one needs reading properly" is visible in the pull request list rather
+# than three clicks into a diff.
+#
+# Why this is not just `labels:` in dependabot.yml: that list is fixed per
+# ecosystem and applied to every pull request it opens. It cannot vary by what
+# the bump turns out to be, because the bump type only exists once Dependabot
+# has resolved the update. Reading it means parsing the metadata Dependabot
+# writes into the pull request, which is what this action does.
+#
+# Why `pull_request_target` and not `pull_request`: a workflow triggered by a
+# Dependabot pull request is given a read-only GITHUB_TOKEN, so `gh pr edit`
+# would fail with a permissions error. `pull_request_target` runs in the
+# context of the base branch and gets a writable one.
+#
+# That trigger is dangerous when misused, and the danger is specific: the job
+# holds write permission while the pull request's own code is untrusted. The
+# rule is never to check that code out and never to execute it. This workflow
+# has no checkout step and runs nothing from the branch — it reads metadata and
+# calls the GitHub API. Adding a checkout here would turn a labelling job into
+# a way to write to the repository from a pull request.
+#
+# Note it does nothing until it is on main: `pull_request_target` reads the
+# workflow file from the base branch, never from the pull request.
+name: Dependabot labels
+
+on:
+  pull_request_target:
+    branches: [main]
+
+# Read-only by default; the one job that needs more asks for it.
+permissions:
+  contents: read
+
+concurrency:
+  # Dependabot rebases its pull requests in place, which re-runs this. Only the
+  # most recent answer is worth having.
+  group: dependabot-labels-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    name: Label semver bump
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The metadata below only exists on Dependabot's own pull requests, and the
+    # write permission should not be handed out to anything else.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    permissions:
+      pull-requests: write
+    steps:
+      - id: metadata
+        uses: dependabot/fetch-metadata@v3
+
+      - name: Apply the label for the bump
+        env:
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # For a grouped update — dependabot.yml batches minor and patch bumps
+          # into one pull request — the action reports the highest semver change
+          # in the group, which is the one that decides how carefully the whole
+          # thing has to be read.
+          case "$UPDATE_TYPE" in
+            version-update:semver-major) add=major ; remove=minor,patch ;;
+            version-update:semver-minor) add=minor ; remove=major,patch ;;
+            version-update:semver-patch) add=patch ; remove=major,minor ;;
+            *)
+              echo "No semver bump reported (update-type='${UPDATE_TYPE}'); nothing to label."
+              exit 0
+              ;;
+          esac
+
+          # Removing the other two matters as much as adding this one. A rebase
+          # can change the answer — a group that was minor yesterday gains a
+          # major bump today — and a stale label then says the opposite of the
+          # truth, which is worse than no label at all.
+          gh pr edit "$PR_URL" --add-label "$add" --remove-label "$remove"
+
+          echo "Labelled \`$add\` (from \`$UPDATE_TYPE\`)." >> "$GITHUB_STEP_SUMMARY"
