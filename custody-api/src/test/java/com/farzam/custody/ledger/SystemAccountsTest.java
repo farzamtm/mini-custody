@@ -3,6 +3,7 @@ package com.farzam.custody.ledger;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.farzam.custody.support.AbstractPostgresTest;
+import com.farzam.custody.support.WithoutKafka;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -17,6 +18,7 @@ import org.springframework.boot.test.context.SpringBootTest;
  * database at startup, which costs a query and a class to hold the result in order to avoid a
  * mistake this catches in milliseconds.
  */
+@WithoutKafka
 @SpringBootTest
 class SystemAccountsTest extends AbstractPostgresTest {
 

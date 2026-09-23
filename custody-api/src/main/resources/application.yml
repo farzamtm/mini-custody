@@ -28,6 +28,23 @@ spring:
       acks: all
       properties:
         enable.idempotence: true
+      # Strings both ways, and the JSON is built by EventJson rather than by a
+      # serialiser. See KafkaConfig for why: the outbox already holds the payload
+      # as text, and a second Jackson configuration is a second set of bytes for
+      # M3's signatures to disagree with.
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    consumer:
+      # The group id is also the `consumer` column in processed_events. The
+      # constant that keeps them in step is SigningResultListener.CONSUMER.
+      group-id: custody-api
+      # A new group reads the topic from the beginning rather than skipping
+      # whatever arrived before it first connected. For results that are applied
+      # idempotently this is the safe direction: re-reading old events is free,
+      # and missing one leaves a withdrawal stuck.
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
 
 management:
   endpoints:
@@ -49,6 +66,24 @@ ledger:
   # How many times LedgerService re-runs a posting that lost an optimistic race
   # before giving up. Dead weight under pessimistic locking, which never loses.
   max-attempts: 50
+
+outbox:
+  relay:
+    # The timer. Off in tests that drive the relay themselves, so they can assert
+    # on one batch instead of sleeping and hoping.
+    scheduled: true
+    # A latency budget, not a throughput one: it decides how long an approved
+    # withdrawal waits before the signer hears about it. A tick that finds
+    # nothing costs one query against the partial index on unpublished rows.
+    poll-interval: 500ms
+    # How many rows one transaction claims. The rows are locked for the duration
+    # of the sends, so this is the knob that trades latency against lock time.
+    batch-size: 100
+    # How long to wait for the broker to acknowledge one message before giving up
+    # on the batch and leaving the rest for the next tick. Bounded, because
+    # Kafka's own delivery.timeout.ms defaults to two minutes and a relay
+    # transaction should not hold row locks for two minutes.
+    ack-timeout: 5s
 
 # Our own configuration, bound to a @ConfigurationProperties class later.
 chain:

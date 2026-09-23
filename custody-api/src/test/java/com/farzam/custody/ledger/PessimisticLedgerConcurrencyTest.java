@@ -1,5 +1,6 @@
 package com.farzam.custody.ledger;
 
+import com.farzam.custody.support.WithoutKafka;
 import org.springframework.boot.test.context.SpringBootTest;
 
 /**
@@ -9,5 +10,6 @@ import org.springframework.boot.test.context.SpringBootTest;
  * {@code application.yml} ships it, and reuses the Spring context the other default-configuration
  * tests already built.
  */
+@WithoutKafka
 @SpringBootTest
 class PessimisticLedgerConcurrencyTest extends AbstractLedgerConcurrencyTest {}

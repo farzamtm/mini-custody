@@ -9,6 +9,7 @@ import com.farzam.custody.ledger.JournalTransactionRepository;
 import com.farzam.custody.ledger.LedgerService;
 import com.farzam.custody.ledger.SystemAccounts;
 import com.farzam.custody.support.AbstractPostgresTest;
+import com.farzam.custody.support.WithoutKafka;
 import com.farzam.custody.whitelist.WhitelistService;
 import com.jayway.jsonpath.JsonPath;
 import java.io.UnsupportedEncodingException;
@@ -40,6 +41,7 @@ import org.springframework.test.web.servlet.assertj.MvcTestResult;
  * system accounts are not: {@code PENDING_OUT} and {@code EXTERNAL} are singletons shared by the
  * whole class and by whatever ran before it, so assertions about them are written as deltas.
  */
+@WithoutKafka
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("dev")

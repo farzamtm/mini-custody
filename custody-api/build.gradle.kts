@@ -139,6 +139,12 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-starter-data-jpa-test")
     testImplementation("org.springframework.boot:spring-boot-starter-kafka-test")
 
+    // Polling with a deadline, for the assertions that are about something another
+    // thread will do shortly: the relay publishing, a listener applying an event.
+    // The alternative is Thread.sleep tuned to whatever the developer's laptop
+    // does, which fails on a loaded CI runner and passes again on a retry.
+    testImplementation("org.awaitility:awaitility")
+
     // Testcontainers: real Postgres and Kafka in tests, not H2 or an embedded
     // broker. Boot 4 prefixes every Testcontainers module with `testcontainers-`.
     testImplementation("org.springframework.boot:spring-boot-testcontainers")

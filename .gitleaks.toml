@@ -10,8 +10,16 @@ useDefault = true
 [[rules]]
 id = "ethereum-private-key"
 description = "Ethereum private key (32 bytes, hex)"
-# 64 hex characters, optionally 0x-prefixed, not part of a longer hex run —
-# which is what distinguishes a key from a transaction hash in a log line.
+# 64 hex characters, optionally 0x-prefixed, not part of a longer hex run.
+#
+# This rule cannot tell a private key from a transaction hash, and no rule can:
+# both are exactly 32 bytes of hex, and a real key has no lower entropy than a
+# real hash. The entropy floor only rules out patterned strings. That trade is
+# deliberate — a rule loose enough to never fire on a key is worth the occasional
+# false positive on a hash — so the convention is on the other side: a hash
+# hard-coded as a test fixture is written so that nothing could mistake it for a
+# key, e.g. "0x" + "deadbeef".repeat(8). Hashes that appear at runtime are never
+# scanned, because they are never committed.
 regex = '''(?i)\b(?:0x)?[0-9a-f]{64}\b'''
 keywords = ["0x", "privatekey", "private_key"]
 entropy = 3.5

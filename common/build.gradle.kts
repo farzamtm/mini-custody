@@ -10,4 +10,9 @@ dependencies {
     // framework-free means the event contract can't drift into service logic.
     api("com.fasterxml.jackson.core:jackson-databind")
     api("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
+
+    // No Spring in the tests either, so no Boot test starter: this module has
+    // no context to load. JUnit and AssertJ are enough to assert on bytes.
+    testImplementation("org.junit.jupiter:junit-jupiter")
+    testImplementation("org.assertj:assertj-core")
 }
