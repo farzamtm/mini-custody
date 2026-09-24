@@ -48,6 +48,12 @@ tags:
       Only mapped under the `dev` Spring profile. These endpoints fabricate state
       that would otherwise come from the chain, so that the withdrawal flow can be
       exercised locally without waiting for a real deposit.
+  - name: dev-withdrawals
+    description: |
+      The same `dev` profile, kept as its own tag because `useTags` generates one
+      interface per tag and one controller implements each: these operations act
+      on withdrawals and belong next to the withdrawal code, not next to the
+      ledger's simulated deposits.
 
 paths:
   /v1/withdrawals:
@@ -207,6 +213,52 @@ paths:
                 $ref: '#/components/schemas/Account'
         '400':
           $ref: '#/components/responses/BadRequest'
+
+  /dev/withdrawals/{withdrawalId}/approve:
+    post:
+      tags: [dev-withdrawals]
+      operationId: simulateApproval
+      summary: Approve a withdrawal without collecting any approvals
+      description: |
+        Moves a `PENDING_APPROVAL` withdrawal to `APPROVED` and writes the
+        `WithdrawalApproved` event to the outbox, in one transaction. The relay
+        publishes it to `custody.withdrawals.v1` within about half a second.
+
+        This is a stand-in for `POST /v1/withdrawals/{id}/approvals`, which
+        arrives in M3 with Ed25519 signature verification, self-approval
+        rejection and an amount-based quorum. It exists so that the outbox, the
+        relay and the signer can be built and demonstrated before the approval
+        machinery does, and it takes no body precisely because it checks nothing.
+
+        Mapped only under the `dev` profile. It is the endpoint that would turn a
+        request for somebody else's money into an approved one, so in any
+        deployment that is not a laptop the bean does not exist and the path
+        returns `404`.
+      parameters:
+        - name: withdrawalId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Approved. The event is queued, and published shortly after.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Withdrawal'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            The withdrawal is not waiting for approval. Approving twice lands
+            here: the second call is not a retry of the first, it is a request to
+            do something the state machine has no edge for.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
 
 components:
 

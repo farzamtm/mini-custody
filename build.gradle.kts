@@ -34,7 +34,8 @@ val coverageExclusions = listOf(
 // pull request cannot quietly delete tests. Override with `-PcoverageMinimum=0`.
 // M0: 0.50 (there was nothing to cover). M1: 0.85, with the ledger at 0.94.
 // M2: 0.90, with custody-api at 0.96.
-val coverageMinimum = BigDecimal((findProperty("coverageMinimum") ?: "0.90").toString())
+// M4: 0.92, with custody-api at 0.96 and common at 0.97.
+val coverageMinimum = BigDecimal((findProperty("coverageMinimum") ?: "0.92").toString())
 
 // Applied to the root project AND every module.
 allprojects {

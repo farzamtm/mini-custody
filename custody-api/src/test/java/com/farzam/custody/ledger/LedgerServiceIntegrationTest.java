@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 import com.farzam.custody.support.AbstractPostgresTest;
+import com.farzam.custody.support.WithoutKafka;
 import java.math.BigInteger;
 import java.util.List;
 import java.util.UUID;
@@ -18,6 +19,7 @@ import org.springframework.boot.test.context.SpringBootTest;
  * <p>Runs against the default locking strategy; the concurrency behaviour, where the two strategies
  * differ, is in {@link PessimisticLedgerConcurrencyTest} and {@link OptimisticLedgerConcurrencyTest}.
  */
+@WithoutKafka
 @SpringBootTest
 class LedgerServiceIntegrationTest extends AbstractPostgresTest {
 

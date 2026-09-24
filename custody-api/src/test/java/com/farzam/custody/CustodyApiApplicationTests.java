@@ -3,6 +3,7 @@ package com.farzam.custody;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.farzam.custody.support.AbstractPostgresTest;
+import com.farzam.custody.support.WithoutKafka;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
@@ -22,6 +23,7 @@ import org.springframework.boot.test.context.SpringBootTest;
  *
  * <p>The Postgres container comes from {@link AbstractPostgresTest}, shared with the ledger tests.
  */
+@WithoutKafka
 @SpringBootTest
 class CustodyApiApplicationTests extends AbstractPostgresTest {
 

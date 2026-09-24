@@ -126,6 +126,7 @@ YAML and the controller stops compiling.
 | `GET /v1/accounts/{id}` | Balance | `200` |
 | `POST /v1/clients/{id}/whitelist` | Allow a destination address | `201` |
 | `POST /dev/deposits` | Seed a balance. Mapped only under the `dev` profile. | `201` |
+| `POST /dev/withdrawals/{id}/approve` | Approve without approvers, standing in for M3. `dev` profile only. | `200` |
 
 **Amounts are strings.** A JSON number is a double in most parsers, which loses
 precision above 2^53; one ETH is 10^18 wei. Every amount in this API is a decimal
@@ -165,6 +166,68 @@ unique index rather than a look-up:
 [ADR 0003](docs/adr/0003-idempotency-keys-are-backed-by-a-unique-index.md) and
 [ADR 0004](docs/adr/0004-the-openapi-contract-generates-the-interfaces.md).
 
+## Events
+
+The two services share Kafka and nothing else. Neither can read the other's
+database, so everything that crosses between them is an event, and the contract for
+those events lives in the `common` module — which deliberately has no Spring
+dependency, so it cannot quietly grow service logic.
+
+| Topic | Key | Producer → consumer | Events |
+| --- | --- | --- | --- |
+| `custody.withdrawals.v1` | withdrawal id | custody-api → signer | `WithdrawalApproved` |
+| `signer.results.v1` | withdrawal id | signer → custody-api | `WithdrawalBroadcast`, `WithdrawalSigningFailed` |
+| `<topic>.DLT` | same | error handler | Anything that failed every retry |
+
+**The key is the withdrawal id, and that is the ordering guarantee.** Kafka only
+orders messages within a partition, and the key chooses the partition — so
+everything about one withdrawal arrives in the order it was written. Events about
+different withdrawals may interleave, which nothing cares about.
+
+**Updating the database and publishing are one transaction, via an outbox.** When a
+withdrawal becomes `APPROVED`, the status change and a row in the `outbox` table are
+written together. Commit-then-publish loses the event if the process dies in
+between, leaving a withdrawal approved that the signer never hears about;
+publish-then-commit is worse, because the signer acts on an approval that was rolled
+back. A row cannot disagree with the status change that wrote it.
+
+`OutboxRelay` then moves rows to Kafka every 500 ms:
+
+```sql
+select ... from outbox where published_at is null
+order by created_at, id limit :batchSize
+for update skip locked
+```
+
+`SKIP LOCKED` is what makes a second instance safe. Plain `FOR UPDATE` would make it
+block on the first instance's rows and then publish them again; `SKIP LOCKED` steps
+over locked rows, so each relay takes a disjoint batch and nothing is sent twice.
+The relay waits for the broker's acknowledgement before marking a row published,
+because otherwise it would be recording that a message had been accepted when all it
+had done was put it in a buffer.
+
+**Delivery is at-least-once, and consumers are built for it.** Between the broker's
+ack and the `UPDATE` there is a window; a crash in it resends the event. That window
+cannot be closed, so every consumer inserts the event id into `processed_events` in
+the same transaction as the state change, and a redelivery finds the row and returns
+having done nothing. Applying a `WithdrawalSigningFailed` twice would release the
+same hold twice — the client credited funds they never had, and the ledger still
+balancing perfectly, because two well-formed postings were made instead of one.
+
+**A message that can never succeed is set aside.** Three retries at 0.5 s, 1 s and
+2 s, then the dead-letter topic. Malformed JSON skips the retries entirely: it will
+be exactly as malformed in two seconds, and a poison message retried forever blocks
+its partition and everything queued behind it.
+
+Each of those has a test: approving publishes exactly one message, two relays
+draining the same backlog publish nothing twice, the same result delivered twice
+changes state and balances once, and a malformed message ends up on `.DLT`.
+
+Why polling rather than Debezium, why the send happens inside the transaction, and
+why every consumer is idempotent:
+[ADR 0005](docs/adr/0005-the-outbox-relay-polls-and-sends-inside-its-transaction.md) and
+[ADR 0006](docs/adr/0006-consumers-are-idempotent-because-delivery-is-at-least-once.md).
+
 ## Running it
 
 Requires JDK 25 and Docker.
@@ -192,15 +255,29 @@ ACCOUNT=$(curl -s localhost:8080/dev/deposits -H 'Content-Type: application/json
 curl -s localhost:8080/v1/clients/$CLIENT/whitelist -H 'Content-Type: application/json' \
   -d "{\"address\":\"$DEST\"}"
 
-curl -s localhost:8080/v1/withdrawals -H 'Content-Type: application/json' \
+WITHDRAWAL=$(curl -s localhost:8080/v1/withdrawals -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $(uuidgen)" \
-  -d "{\"accountId\":\"$ACCOUNT\",\"destination\":\"$DEST\",\"amountWei\":\"400000000000000000\"}"
+  -d "{\"accountId\":\"$ACCOUNT\",\"destination\":\"$DEST\",\"amountWei\":\"400000000000000000\"}" | jq -r .id)
 
 curl -s localhost:8080/v1/accounts/$ACCOUNT   # 600000000000000000 — 0.4 is held
+
+curl -s -XPOST localhost:8080/dev/withdrawals/$WITHDRAWAL/approve   # status APPROVED
 ```
 
-Send the third command twice with the same `Idempotency-Key` and the balance still
-reads 0.6: the retry returns the original withdrawal and holds nothing extra.
+Send the withdrawal request twice with the same `Idempotency-Key` and the balance
+still reads 0.6: the retry returns the original withdrawal and holds nothing extra.
+
+The approval writes an outbox row, and the relay publishes it within about half a
+second. Watch it leave:
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic custody.withdrawals.v1 --from-beginning
+```
+
+Nothing consumes it yet — that is the signer, in M5. Approving the same withdrawal a
+second time returns `409`: the state machine has no `APPROVED → APPROVED` edge, so
+there is no second event either.
 
 Tests use [Testcontainers](https://testcontainers.com/), so they start their own
 throwaway Postgres and do not need the Compose stack running. A real Postgres
@@ -219,7 +296,7 @@ build is something you find before you push, not after.
 | Format | [Spotless](https://github.com/diffplug/spotless) (Eclipse JDT) | Anything `./gradlew spotlessApply` would change. |
 | Style | [Checkstyle](https://checkstyle.org/) | Naming, unused imports, swallowed exceptions, `System.out`, methods over 12 branches — and `float`/`double` anywhere, because wei is an exact integer. |
 | Bugs and SAST | [SpotBugs](https://spotbugs.github.io/) + [find-sec-bugs](https://find-sec-bugs.github.io/) | Null dereferences, resource leaks, SQL injection, weak crypto, predictable RNG. |
-| Coverage | [JaCoCo](https://www.jacoco.org/) | Line coverage below 90%. A floor that ratchets up per milestone, not a target. |
+| Coverage | [JaCoCo](https://www.jacoco.org/) | Line coverage below 92%. A floor that ratchets up per milestone, not a target. |
 | Secrets | [Gitleaks](https://github.com/gitleaks/gitleaks) | Credentials anywhere in history, with extra rules for Ethereum private keys and the signer master key. |
 | Dependencies | CycloneDX SBOM → [Trivy](https://trivy.dev/) | A new HIGH or CRITICAL CVE that has a released fix. |
 
@@ -272,7 +349,7 @@ Useful invocations:
 | ✅ | **M0** Skeleton | Multi-module Gradle, Docker stack, Flyway-owned schema, Testcontainers |
 | ✅ | **M1** Ledger | Double-entry posting, row locking, concurrency under 50 threads |
 | ✅ | **M2** Withdrawal API | API-first OpenAPI contract, idempotency keys, RFC 9457 errors |
-| ⬜ | **M4** Outbox and Kafka | Transactional outbox, `SKIP LOCKED` relay, idempotent consumers, DLT |
+| ✅ | **M4** Outbox and Kafka | Transactional outbox, `SKIP LOCKED` relay, idempotent consumers, DLT |
 | ⬜ | **M5** Signer | Envelope encryption, nonce management, EIP-1559 signing and broadcast |
 | ⬜ | **M3** Approvals | Ed25519 four-eyes approval with amount-based quorum |
 | ⬜ | **M6** Confirmations | Receipt polling, settlement, reconciliation against the chain |
@@ -288,6 +365,11 @@ This is a learning project, and the gaps are deliberate rather than overlooked:
 - No authentication or authorisation on the API yet, one chain, one asset.
 - Single Kafka broker with no replication, and plain-text passwords in
   `docker-compose.yml`. Local development configuration, not deployable.
+- The outbox relay stops its batch on a failed send, so one permanently unsendable
+  row halts it. A production relay would count attempts and park a row that has
+  failed enough times, and alert on the age of the oldest unpublished row.
+- `processed_events` grows for ever. It needs a job deleting rows older than the
+  topic's retention, beyond which no redelivery is possible.
 
 ## Licence
 

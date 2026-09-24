@@ -1,5 +1,6 @@
 package com.farzam.custody.ledger;
 
+import com.farzam.custody.support.WithoutKafka;
 import org.springframework.boot.test.context.SpringBootTest;
 
 /**
@@ -13,5 +14,6 @@ import org.springframework.boot.test.context.SpringBootTest;
  * <p>Overriding the property builds a second Spring context, which is why the two strategies live
  * in separate classes rather than one parameterised test.
  */
+@WithoutKafka
 @SpringBootTest(properties = "ledger.locking=optimistic")
 class OptimisticLedgerConcurrencyTest extends AbstractLedgerConcurrencyTest {}
