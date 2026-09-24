@@ -1,6 +1,7 @@
 package com.farzam.custody.web;
 
 import com.farzam.custody.chain.MalformedAddressException;
+import com.farzam.custody.chain.RpcException;
 import com.farzam.custody.ledger.InsufficientFundsException;
 import com.farzam.custody.ledger.LedgerContentionException;
 import com.farzam.custody.ledger.UnknownAccountException;
@@ -185,6 +186,32 @@ class ApiErrors extends ResponseEntityExceptionHandler {
         ProblemDetail problem = parameterProblem();
         problem.setProperty("errors", failure.getConstraintViolations().stream().map(ApiErrors::describe).toList());
         return problem;
+    }
+
+    // ---- 502 ---------------------------------------------------------------
+
+    /**
+     * The chain could not be reached, so the question was not answered.
+     *
+     * <p>{@code 502 Bad Gateway} rather than a {@code 200} with an empty report, and the distinction
+     * is the same one the confirmation watcher makes: a node that cannot be asked has said nothing,
+     * and "no answer" must never read as "the chain agrees". A reconciliation endpoint that returned
+     * a clean bill of health when its only source of truth was unreachable would be worse than one
+     * that did not exist.
+     *
+     * <p>Only {@code GET /v1/reconciliation} can reach this. The watcher's own RPC failures never
+     * touch the web layer — they roll a scheduled transaction back and are retried on the next tick.
+     */
+    @ExceptionHandler(RpcException.class)
+    ProblemDetail chainUnreachable(RpcException failure) {
+        LOG.warn("a request needed the chain and could not reach it", failure);
+        return problem(
+                HttpStatus.BAD_GATEWAY,
+                "Chain unreachable",
+                "CHAIN_UNREACHABLE",
+                // The node's own message can name an internal hostname or a provider's API key in a
+                // URL. The type is enough for a client; the cause is in the log.
+                "the Ethereum node could not be reached, so this question was not answered");
     }
 
     // ---- 503 ---------------------------------------------------------------

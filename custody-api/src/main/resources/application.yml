@@ -85,8 +85,36 @@ outbox:
     # transaction should not hold row locks for two minutes.
     ack-timeout: 5s
 
-# Our own configuration, bound to a @ConfigurationProperties class later.
+# Bound to ChainProperties. custody-api only reads the chain — it holds no key and
+# cannot send anything; the signer does that.
 chain:
   rpc-url: http://localhost:8545
   chain-id: 31337
+  # How many blocks must sit on a receipt before the ledger settles against it.
+  # Three keeps a local demo quick and means nothing in particular: a real
+  # deployment would use Ethereum's `finalized` block tag, which is an actual
+  # guarantee rather than a guess about how deep a reorg can go.
   confirmations: 3
+  # The address the signer sends from — public information, on every transaction.
+  # Only used by reconciliation, and only to report what it holds; nothing settles
+  # on it. Empty by default because the signer's wallet is the signer's
+  # configuration, and a wrong address here would report a stranger's balance.
+  hot-wallet-address: ${CUSTODY_HOT_WALLET_ADDRESS:}
+  # A latency budget: how long after the third confirmation a client sees
+  # CONFIRMED. A tick that finds nothing costs one indexed query.
+  poll-interval: 2s
+  # How many broadcast withdrawals one tick claims. The rows are locked while
+  # their receipts are fetched, so this trades latency against lock time, as the
+  # outbox relay's batch size does.
+  batch-size: 100
+  # Bounded, because the watcher holds a database transaction open across it.
+  rpc-timeout: 5s
+  # How long a withdrawal may sit in BROADCAST with no receipt before
+  # reconciliation mentions it. Not a failure — the signer resends on its own
+  # timer — but an unmined transaction this old is something a person should see,
+  # because nothing in this system reprices one.
+  stuck-after: 10m
+  watcher:
+    # The timer. Off in tests that drive the watcher themselves, so they can
+    # assert on one pass instead of sleeping and hoping.
+    scheduled: true

@@ -2,6 +2,7 @@ package com.farzam.custody;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
@@ -24,8 +25,13 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  *
  * <p>{@code @EnableScheduling} switches on the {@code @Scheduled} support that the
  * outbox relay (M4) and the confirmation watcher (M6) need.
+ *
+ * <p>{@code @ConfigurationPropertiesScan} finds the {@code @ConfigurationProperties}
+ * records — {@code ChainProperties}, for now — without each one needing to be listed
+ * in an {@code @EnableConfigurationProperties} somewhere. The signer does the same.
  */
 @SpringBootApplication
+@ConfigurationPropertiesScan
 @EnableScheduling
 public class CustodyApiApplication {
 

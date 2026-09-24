@@ -35,7 +35,12 @@ val coverageExclusions = listOf(
 // M0: 0.50 (there was nothing to cover). M1: 0.85, with the ledger at 0.94.
 // M2: 0.90, with custody-api at 0.96.
 // M4: 0.92, with custody-api at 0.96 and common at 0.97.
-val coverageMinimum = BigDecimal((findProperty("coverageMinimum") ?: "0.92").toString())
+// M6: 0.93, with custody-api at 0.96, common at 0.97 and the signer at 0.94.
+//
+// The rule is applied per module, so the floor is set by whichever is lowest — the
+// signer, at 0.9396, which M6 does not touch. 0.94 would fail on it today, which is
+// why the ratchet is one step rather than two.
+val coverageMinimum = BigDecimal((findProperty("coverageMinimum") ?: "0.93").toString())
 
 // Applied to the root project AND every module.
 allprojects {
