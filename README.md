@@ -5,8 +5,11 @@ withdrawal of ETH, approvers sign off, an isolated signer service signs a real
 Ethereum transaction and broadcasts it to a local node, and a watcher confirms
 it and settles a double-entry ledger.
 
-> **Status: in progress.** See [Milestones](#milestones) for what is actually
-> built. Anything not ticked there is designed but not implemented.
+> **Status: the whole path works.** A withdrawal can be requested, approved by two
+> people, signed, broadcast and settled against the ledger once the chain confirms
+> it. See [Milestones](#milestones) for what each step demonstrates, and
+> [What a production system would do differently](#what-a-production-system-would-do-differently)
+> for the gaps that are deliberate.
 
 ## Why it looks like this
 
@@ -82,6 +85,15 @@ Nothing outside `LedgerService.post` is allowed to touch `accounts.balance`.
 | Withdrawal confirmed | PENDING_OUT −0.4, EXTERNAL +0.4 |
 | Withdrawal failed or rejected | PENDING_OUT −0.4, CLIENT +0.4 |
 | Network fee paid | BANK_OPERATING −fee, EXTERNAL +fee |
+| Operating float funded | EXTERNAL −10, BANK_OPERATING +10 |
+
+The last two go together. Gas is the custodian's cost rather than the client's — a
+withdrawal of 0.4 ETH that cost the client more than 0.4 ETH is not what they were told
+— so it comes out of `BANK_OPERATING`, and `accounts_non_negative` means that account
+has to hold something first. `V5__confirmations.sql` books the float as a real journal
+transaction rather than setting a balance column, because `accounts.balance` is a cache
+of the journal and a migration that wrote one without the other would leave
+`recomputedBalanceOf` disagreeing with `balanceOf`.
 
 Three properties hold, and each has a test rather than a comment:
 
@@ -122,9 +134,10 @@ YAML and the controller stops compiling.
 | Method and path | Purpose | Success |
 | --- | --- | --- |
 | `POST /v1/withdrawals` | Request a withdrawal. Header `Idempotency-Key` required. | `202` + `Location` |
-| `GET /v1/withdrawals/{id}` | Current state and transaction hash | `200` |
+| `GET /v1/withdrawals/{id}` | Current state, transaction hash and confirmation count | `200` |
 | `POST /v1/withdrawals/{id}/approvals` | Record one approver's Ed25519 sign-off | `201` |
 | `GET /v1/accounts/{id}` | Balance | `200` |
+| `GET /v1/reconciliation` | Compare the ledger against the chain | `200` |
 | `POST /v1/clients/{id}/whitelist` | Allow a destination address | `201` |
 | `POST /dev/deposits` | Seed a balance. Mapped only under the `dev` profile. | `201` |
 | `POST /dev/approvers` | Register an approver's public key. `dev` profile only. | `201` |
@@ -396,6 +409,82 @@ low" have to be told apart with a receipt lookup, and what a production signer
 would do about a stuck transaction:
 [ADR 0008](docs/adr/0008-sign-and-commit-before-broadcasting-and-never-re-sign.md).
 
+## Confirmations and settlement
+
+The last step, and the only one whose input is the outside world rather than another
+part of this system. Everything before it is a claim — the client asked, the approvers
+agreed, the signer says it sent something. This is where the ledger finds out whether
+the money actually left.
+
+```mermaid
+flowchart LR
+    W[withdrawal in BROADCAST] --> P{eth_getTransactionReceipt}
+    P -->|none| K[keep waiting]
+    P -->|receipt| C{≥ 3 confirmations?}
+    C -->|no| R[(record it, wait)]
+    C -->|yes, status 0x1| S[CONFIRMED<br/>PENDING_OUT → EXTERNAL]
+    C -->|yes, status 0x0| F[FAILED<br/>the hold goes back]
+    S --> G[+ NETWORK_FEE]
+    F --> G
+```
+
+**Broadcast is not settled, and the gap is the whole reason the watcher exists.** A
+transaction in the mempool can be dropped, replaced, or mined into a block that is
+later reorganised away. The funds stay in `PENDING_OUT` — where they have been since
+the request — until a receipt has three blocks on top of it. Three is a number chosen
+to keep a local demo quick; a real deployment would use Ethereum's `finalized` block
+tag, which is an actual guarantee rather than a guess about how deep a reorg can go.
+
+**A mined transaction is not a successful one.** A receipt exists for a transfer that
+reverted just as much as for one that worked, and the fee is charged either way. The
+`status` field decides, and it is checked as "is it success" rather than "is it
+failure", so a node returning something unexpected reads as not-successful — the safe
+direction, since the other one settles the ledger for money that never moved.
+
+**Gas is the custodian's cost.** `BANK_OPERATING −fee / EXTERNAL +fee`, booked for a
+revert as well as a success, because the chain charges for both — a fee only recorded
+on the happy path is a ledger that drifts from the hot wallet by exactly the amount of
+every failure. A withdrawal of 0.4 ETH that cost the client more than 0.4 ETH is not
+what the client was told, so `V5__confirmations.sql` seeds `BANK_OPERATING` with a
+float to pay it from.
+
+**An unreachable node settles nothing.** The exception propagates, the transaction
+rolls back, the row locks go, and the next tick tries again. A node that cannot be
+asked has said nothing, and "no answer" must never reach the ledger as "no receipt".
+
+### Reconciliation
+
+The watcher settles once, on what the chain said at that moment, and then never looks
+at that withdrawal again. So it cannot catch its own mistakes: the thing that would
+reveal them is the thing it already believes, and nothing emits an event when a block
+quietly stops existing. `GET /v1/reconciliation` goes back and asks.
+
+| Finding | Means |
+| --- | --- |
+| `SETTLED_WITHOUT_A_RECEIPT` | The ledger recorded an outflow the chain no longer supports — a reorg deeper than three blocks |
+| `SETTLED_A_REVERTED_TRANSACTION` | The chain says the transaction failed, and the ledger settled it anyway |
+| `SETTLED_WITHOUT_A_POSTING` | The status and the journal came apart, which the code cannot do — so somebody did it in SQL |
+| `BROADCAST_BUT_NOT_MINED` | On the wire a long time and still not mined. The signer resends; it never reprices |
+
+It asks the chain rather than the receipt table, because comparing a stored receipt
+against a stored settlement is comparing the service to itself — and a service that
+has settled something that never happened is perfectly consistent about it.
+
+**It reports and never repairs.** Every finding has more than one possible cause, and
+the right remedy depends on which: a settlement with no receipt behind it might want a
+reversing entry, or might mean the node being asked is on the wrong chain. A job that
+guessed would turn a detectable problem into two.
+
+**The hot wallet's balance is reported and never asserted on.** It cannot be
+reconciled here, and that is worth being explicit about rather than papering over:
+deposits are fabricated by `POST /dev/deposits` rather than observed on chain, because
+nothing in this project watches for incoming transfers. A balance check that failed on
+every run would train everybody to ignore the whole report.
+
+Why the confirmation count is inclusive, why the receipt is stored at all, and why the
+reconciler has no write path:
+[ADR 0011](docs/adr/0011-settlement-waits-for-confirmations-and-reconciliation-only-reports.md).
+
 ## Running it
 
 Requires JDK 25 and Docker.
@@ -495,14 +584,39 @@ with an empty `approvals` list, and the signer says no.
 configures it as trusted, funds a wallet on Anvil and follows a withdrawal through to a
 mined transaction.
 
+Once something *has* been signed and broadcast, the confirmation watcher takes over on
+its own. Compose runs Anvil with `--block-time 2`, so blocks arrive whether or not
+anybody is asking, and the withdrawal walks itself the rest of the way:
+
+```bash
+# BROADCAST, then "confirmations": 1, 2, 3, then CONFIRMED — about six seconds
+watch -n1 "curl -s localhost:8080/v1/withdrawals/$WITHDRAWAL | jq '{status, confirmations, txHash}'"
+
+curl -s localhost:8080/v1/accounts/$ACCOUNT   # still 0.6: the hold became an outflow,
+                                              # it did not come back
+
+curl -s localhost:8080/v1/reconciliation | jq
+# {"agrees": true, "confirmedChecked": 1, "inFlightChecked": 0, "discrepancies": []}
+```
+
+Note what settlement did *not* do to the client's balance. The 0.4 ETH left
+`PENDING_OUT` for `EXTERNAL` rather than returning to the client, which is the whole
+difference between a confirmed withdrawal and a failed one — and the gas came out of
+`BANK_OPERATING`, so the client paid 0.4 ETH for a 0.4 ETH withdrawal.
+
 Tests use [Testcontainers](https://testcontainers.com/), so they start their own
 throwaway Postgres, Kafka and Anvil and do not need the Compose stack running. A
 real Postgres rather than H2, because the ledger depends on
 `FOR UPDATE SKIP LOCKED`, `jsonb`, partial indexes and `numeric(78,0)` — an H2 test
-would pass while production broke. A real Anvil rather than a stub node, because
-what the signer's tests are asking is whether the bytes it produced are a
-transaction the EVM accepts, and a stub would have to reimplement the EVM to have
-an opinion.
+would pass while production broke. A real Anvil rather than a stub node in both
+services, for two different reasons: the signer's tests are asking whether the bytes
+it produced are a transaction the EVM accepts, and custody-api's are asking whether it
+reads a real receipt correctly — `status` as `"0x1"` and not `true`,
+`effectiveGasPrice` rather than `gasPrice`, a JSON `null` for a transaction that is not
+mined. A canned response would confirm the test author's assumption instead of checking
+it. The watcher's Anvil runs with `--no-mining` so a test can say exactly how many
+blocks exist, and `evm_snapshot`/`evm_revert` is how the reorg case is staged: a real
+transaction that really was mined and really is not there any more.
 
 ## Quality gates
 
@@ -571,7 +685,7 @@ Useful invocations:
 | ✅ | **M4** Outbox and Kafka | Transactional outbox, `SKIP LOCKED` relay, idempotent consumers, DLT |
 | ✅ | **M5** Signer | Envelope encryption, nonce management, EIP-1559 signing and broadcast |
 | ✅ | **M3** Approvals | Ed25519 four-eyes approval with amount-based quorum |
-| ⬜ | **M6** Confirmations | Receipt polling, settlement, reconciliation against the chain |
+| ✅ | **M6** Confirmations | Receipt polling, settlement, reconciliation against the chain |
 
 ## What a production system would do differently
 
@@ -585,10 +699,18 @@ This is a learning project, and the gaps are deliberate rather than overlooked:
   keeps most of the assets offline, moves them to the hot wallet in batches, and
   derives a fresh deposit address per client from an extended public key.
 - The signer resends a stuck transaction but never reprices it. A transaction whose
-  fee is too low needs replacing at the *same* nonce with a fee about 10% higher;
-  automating that needs a view of how long is too long, which arrives with M6's
-  watcher. A nonce gap likewise has a standard manual remedy — a zero-value
-  transaction to yourself at the stuck nonce — that nothing here performs.
+  fee is too low needs replacing at the *same* nonce with a fee about 10% higher, and
+  nothing here does that. Reconciliation now at least *reports* it —
+  `BROADCAST_BUT_NOT_MINED` after `chain.stuck-after` — so the gap is visible rather
+  than silent, but acting on it is a person's job. A nonce gap likewise has a standard
+  manual remedy, a zero-value transaction to yourself at the stuck nonce, that nothing
+  here performs.
+- Nothing watches for incoming deposits. `POST /dev/deposits` fabricates them, so the
+  ledger's view of what the custodian holds cannot be reconciled against the hot
+  wallet's on-chain balance — reconciliation reports that balance and deliberately
+  does not compare it. Closing the loop is a deposit watcher with the same shape as
+  the confirmation one, and it is the obvious next milestone rather than a gap in this
+  one.
 - Finality would use Ethereum's `finalized` block tag, not a fixed 3
   confirmations — that number exists to keep a local demo fast.
 - No authentication or authorisation on the API yet, one chain, one asset.

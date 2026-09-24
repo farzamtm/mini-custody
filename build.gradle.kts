@@ -35,12 +35,13 @@ val coverageExclusions = listOf(
 // M0: 0.50 (there was nothing to cover). M1: 0.85, with the ledger at 0.94.
 // M2: 0.90, with custody-api at 0.96.
 // M4: 0.92, with custody-api at 0.96 and common at 0.97.
+// M6: 0.93, with custody-api at 0.96, common at 0.97 and the signer at 0.94.
 // M3: 0.93, with custody-api at 0.97, common at 0.96 and the signer at 0.94.
 //
-// The rule is applied per module, so the floor is set by whichever is lowest —
-// the signer, at 0.9412, which M3 barely moves. 0.94 would leave it about half a
-// line of margin, which is a floor that fails on the next unrelated change. 0.93
-// is the honest ratchet.
+// The rule is applied per module, so the floor is set by whichever is lowest — the
+// signer, at 0.9412, which neither of the last two milestones really touches. 0.94
+// would leave it about half a line of margin, which is a floor that fails on the
+// next unrelated change, so the ratchet is one step rather than two.
 val coverageMinimum = BigDecimal((findProperty("coverageMinimum") ?: "0.93").toString())
 
 // Applied to the root project AND every module.

@@ -25,5 +25,14 @@ public enum JournalKind {
     WITHDRAWAL_RELEASE,
 
     /** Gas paid to miners: BANK_OPERATING −fee, EXTERNAL +fee. */
-    NETWORK_FEE
+    NETWORK_FEE,
+
+    /**
+     * The custodian funding its own gas account: EXTERNAL −amount, BANK_OPERATING +amount.
+     *
+     * <p>Not a client's money and not a deposit, which is why it is a kind of its own rather than a
+     * {@code DEPOSIT} against a system account. Seeded once by {@code V5__confirmations.sql}; in a
+     * real deployment it is what the treasury topping up the hot wallet books.
+     */
+    OPERATING_FLOAT
 }

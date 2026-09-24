@@ -49,6 +49,12 @@ tags:
       is the approval package's.
   - name: accounts
     description: Reading ledger balances.
+  - name: reconciliation
+    description: |
+      Comparing what the ledger says happened on chain with what the chain says.
+      Its own tag because `useTags` generates one interface per tag and one
+      controller implements each, and this one belongs next to the confirmation
+      watcher whose work it is checking.
   - name: clients
     description: Per-client configuration, starting with the destination whitelist.
   - name: dev
@@ -249,6 +255,48 @@ paths:
                 $ref: '#/components/schemas/Account'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  /v1/reconciliation:
+    get:
+      tags: [reconciliation]
+      operationId: reconcile
+      summary: Compare the ledger against the chain
+      description: |
+        Runs the reconciliation and returns what it found. Reads only — nothing
+        here repairs anything, because every finding has more than one possible
+        cause and the right remedy depends on which. The ledger is append-only, so
+        a repair is a reversing entry made by somebody who has looked.
+
+        Synchronous, and it makes one JSON-RPC call per settled or in-flight
+        withdrawal, so at real volume this would be a scheduled job writing to a
+        report rather than a request anybody waits on. It is an endpoint here
+        because being able to ask the question by hand is what makes the property
+        demonstrable.
+
+        `hotWalletBalanceWei` is information, not a check. It cannot be reconciled
+        in this system: deposits are fabricated by `POST /dev/deposits` rather than
+        observed on chain, because nothing here watches for incoming transfers. A
+        balance check that failed on every run would train everybody to ignore the
+        report.
+      responses:
+        '200':
+          description: |
+            The run completed. An empty `discrepancies` with `confirmedChecked` of
+            zero means nothing has settled yet, which is not the same as agreement
+            — the counts are there so the two can be told apart.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reconciliation'
+        '502':
+          description: |
+            The chain could not be reached, so the question was not answered. A
+            `502` rather than a `200` with an empty report: "the node did not
+            reply" must never read as "the chain agrees".
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
 
   /v1/clients/{clientId}/whitelist:
     post:
@@ -505,6 +553,20 @@ components:
           nullable: true
           description: The on-chain transaction hash. Null until the signer broadcasts.
           example: '0x9f2a...'
+        confirmations:
+          type: integer
+          nullable: true
+          description: |
+            How many blocks, including its own, sit on the transaction's receipt —
+            or null while the chain has no receipt for it, which covers "still in
+            the mempool", "dropped" and "reorganised out" alike.
+
+            Read from what the watcher last observed rather than from the chain, so
+            polling this endpoint does not put a JSON-RPC call behind every request.
+            It is therefore up to `chain.poll-interval` out of date, which for a
+            number that increments every twelve seconds is not a distinction anybody
+            can act on.
+          example: 2
         failureReason:
           type: string
           nullable: true
@@ -673,6 +735,59 @@ components:
         because a signature of the wrong size is a malformed request rather than a
         failed verification, and the two deserve different status codes.
       pattern: '^[A-Za-z0-9+/]{86}==$'
+
+    Reconciliation:
+      type: object
+      required: [checkedAt, confirmedChecked, inFlightChecked, agrees, discrepancies]
+      properties:
+        checkedAt:
+          type: string
+          format: date-time
+        confirmedChecked:
+          type: integer
+          description: How many settled withdrawals were compared against the chain.
+        inFlightChecked:
+          type: integer
+          description: How many broadcast withdrawals were looked at.
+        agrees:
+          type: boolean
+          description: |
+            True when nothing disagreed. Read it together with the counts: a run
+            that checked nothing also agrees, and means something else entirely.
+        hotWalletBalanceWei:
+          type: string
+          nullable: true
+          description: |
+            What the signer's wallet holds on chain, or null if `chain.hot-wallet-address`
+            is not configured. Information only — see the operation description.
+          pattern: '^[0-9]{1,78}$'
+        discrepancies:
+          type: array
+          items:
+            $ref: '#/components/schemas/Discrepancy'
+
+    Discrepancy:
+      type: object
+      required: [withdrawalId, kind, detail]
+      properties:
+        withdrawalId:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          description: |
+            Worst first. The first two mean the ledger has recorded an outflow the
+            chain does not support; the third means a settlement's two halves came
+            apart; the last is operational — a transaction that has not been mined
+            for a long time, which the signer resends but never reprices.
+          enum:
+            - SETTLED_WITHOUT_A_RECEIPT
+            - SETTLED_A_REVERTED_TRANSACTION
+            - SETTLED_WITHOUT_A_POSTING
+            - BROADCAST_BUT_NOT_MINED
+        detail:
+          type: string
+          description: One sentence for a human. Contains no client data.
 
     DepositRequest:
       type: object

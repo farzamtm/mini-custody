@@ -27,8 +27,9 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * outbox relay (M4) and the confirmation watcher (M6) need.
  *
  * <p>{@code @ConfigurationPropertiesScan} finds the {@code @ConfigurationProperties}
- * records — the approval quorum, for now — without each one needing to be listed in
- * an {@code @EnableConfigurationProperties} somewhere. The signer does the same.
+ * records — {@code ApprovalProperties} and {@code ChainProperties} — without each one
+ * needing to be listed in an {@code @EnableConfigurationProperties} somewhere. The
+ * signer does the same.
  */
 @SpringBootApplication
 @ConfigurationPropertiesScan
