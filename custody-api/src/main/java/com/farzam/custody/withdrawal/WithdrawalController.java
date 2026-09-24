@@ -22,9 +22,11 @@ import org.springframework.web.bind.annotation.RestController;
 class WithdrawalController implements WithdrawalsApi {
 
     private final WithdrawalService withdrawals;
+    private final ConfirmationCount confirmations;
 
-    WithdrawalController(WithdrawalService withdrawals) {
+    WithdrawalController(WithdrawalService withdrawals, ConfirmationCount confirmations) {
         this.withdrawals = withdrawals;
+        this.confirmations = confirmations;
     }
 
     /**
@@ -57,10 +59,18 @@ class WithdrawalController implements WithdrawalsApi {
                 .body(WithdrawalDtos.of(withdrawal));
     }
 
+    /**
+     * The endpoint the {@code Location} header points at, and the one a client polls.
+     *
+     * <p>Which is why the confirmation count is read from the watcher's last observation rather than
+     * from the chain: a client watching a withdrawal through three confirmations makes a lot of these
+     * requests, and putting a JSON-RPC call behind each one would turn polling into load on the node
+     * for a number that moves every twelve seconds anyway.
+     */
     @Override
     public ResponseEntity<WithdrawalDto> getWithdrawal(UUID withdrawalId) {
         Withdrawal withdrawal = withdrawals.find(withdrawalId)
                 .orElseThrow(() -> NotFoundException.withdrawal(withdrawalId));
-        return ResponseEntity.ok(WithdrawalDtos.of(withdrawal));
+        return ResponseEntity.ok(WithdrawalDtos.of(withdrawal, confirmations.forWithdrawal(withdrawalId)));
     }
 }

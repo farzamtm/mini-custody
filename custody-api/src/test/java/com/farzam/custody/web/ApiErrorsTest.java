@@ -3,6 +3,7 @@ package com.farzam.custody.web;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.farzam.custody.chain.MalformedAddressException;
+import com.farzam.custody.chain.RpcException;
 import com.farzam.custody.ledger.AccountType;
 import com.farzam.custody.ledger.InsufficientFundsException;
 import com.farzam.custody.ledger.JournalKind;
@@ -60,6 +61,22 @@ class ApiErrorsTest {
 
         assertStatusAndCode(problem, HttpStatus.CONFLICT, "ILLEGAL_STATE_TRANSITION");
         assertThat(problem.getDetail()).contains("CONFIRMED").contains("APPROVED");
+    }
+
+    /**
+     * A node that could not be reached is a {@code 502}, and the node's own words do not cross.
+     *
+     * <p>{@code 502} rather than a {@code 200} with an empty report, for the reason the confirmation
+     * watcher gives: "the node did not answer" must never read as "the chain agrees". The message
+     * stays in the log, because a JSON-RPC failure can name an internal hostname or carry a
+     * provider's API key in a URL.
+     */
+    @Test
+    void anUnreachableChainIsABadGatewayAndSaysNothingAboutTheNode() {
+        ProblemDetail problem = errors.chainUnreachable(new RpcException("could not reach https://node.internal:8545"));
+
+        assertStatusAndCode(problem, HttpStatus.BAD_GATEWAY, "CHAIN_UNREACHABLE");
+        assertThat(problem.getDetail()).doesNotContain("node.internal");
     }
 
     @Test
