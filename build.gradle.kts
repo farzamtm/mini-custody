@@ -38,10 +38,9 @@ val coverageExclusions = listOf(
 // M3: 0.93, with custody-api at 0.97, common at 0.96 and the signer at 0.94.
 //
 // The rule is applied per module, so the floor is set by whichever is lowest —
-// the signer, and M3 nudged it down rather than up: moving Ed25519 into `common`
-// took a small, fully covered class out of the signer's denominator. 0.94 would
-// leave it half a line of margin, which is a floor that fails on the next
-// unrelated change. 0.93 is the honest ratchet.
+// the signer, at 0.9412, which M3 barely moves. 0.94 would leave it about half a
+// line of margin, which is a floor that fails on the next unrelated change. 0.93
+// is the honest ratchet.
 val coverageMinimum = BigDecimal((findProperty("coverageMinimum") ?: "0.93").toString())
 
 // Applied to the root project AND every module.
