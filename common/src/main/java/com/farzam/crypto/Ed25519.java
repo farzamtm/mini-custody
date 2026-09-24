@@ -1,10 +1,11 @@
-package com.farzam.signer.crypto;
+package com.farzam.crypto;
 
 import java.math.BigInteger;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
 import java.security.PublicKey;
 import java.security.Signature;
+import java.security.interfaces.EdECPublicKey;
 import java.security.spec.EdECPoint;
 import java.security.spec.EdECPublicKeySpec;
 import java.security.spec.NamedParameterSpec;
@@ -16,6 +17,15 @@ import java.security.spec.NamedParameterSpec;
  * service that already carries one crypto library: the fewer implementations of signature
  * verification in this process, the fewer of them can be wrong.
  *
+ * <p><b>Why this lives in {@code common} rather than in either service.</b> Both of them verify the
+ * same signatures over the same {@link com.farzam.events.ApprovalStatement}: custody-api before it
+ * will record an approval, the signer again before it will touch a private key. Two copies of the
+ * unpacking below would be two chances to get the byte order wrong, and the failure mode of a
+ * disagreement is not a crash — it is custody-api accepting an approval that the signer then
+ * refuses, leaving the withdrawal stuck with both services convinced they are right. The duplication
+ * that {@code docs/adr/0009} accepts for the outbox is Spring infrastructure, which cannot come here
+ * at all; this is fifty lines of pure JDK with no such obstacle.
+ *
  * <p><b>Why Ed25519 for approvals and secp256k1 for transactions.</b> They are answering different
  * questions. The transaction signature has to be one Ethereum will accept, so the curve is not a
  * choice. The approval signature is internal, so it can be the better algorithm: Ed25519 derives its
@@ -26,13 +36,15 @@ import java.security.spec.NamedParameterSpec;
  *
  * <p><b>The 32 bytes are not an encoding anybody's {@code KeyFactory} takes directly.</b> An Ed25519
  * public key on the wire is the curve point's y coordinate, little-endian, with the top bit of the
- * last byte carrying the sign of x — that is what {@link #publicKeyFrom} unpacks. The alternative is
- * to hand-build an X.509 {@code SubjectPublicKeyInfo} by gluing a fixed twelve-byte DER prefix in
- * front, which is shorter, entirely standard, and reads like a magic number six months later.
+ * last byte carrying the sign of x — that is what {@link #publicKeyFrom} unpacks and
+ * {@link #rawPublicKey} packs. The alternative is to hand-build an X.509 {@code SubjectPublicKeyInfo}
+ * by gluing a fixed twelve-byte DER prefix in front, which is shorter, entirely standard, and reads
+ * like a magic number six months later.
  */
 public final class Ed25519 {
 
-    private static final String ALGORITHM = "Ed25519";
+    /** The JCA name, for {@code KeyFactory}, {@code KeyPairGenerator} and {@code Signature} alike. */
+    public static final String ALGORITHM = "Ed25519";
 
     /** A raw Ed25519 public key: one compressed curve point. */
     private static final int PUBLIC_KEY_BYTES = 32;
@@ -83,14 +95,43 @@ public final class Ed25519 {
     }
 
     /**
+     * Writes a public key back out in the form it travels in.
+     *
+     * <p>The exact inverse of {@link #publicKeyFrom}, and it is here for the same reason that method
+     * is: a key the JDK generates is a curve point, while everything that stores or transmits one —
+     * {@code approvers.public_key}, the signer's trusted list, an approval on the wire — holds the 32
+     * packed bytes instead. Something has to do the packing, and keeping it next to the unpacking is
+     * what makes the round trip one testable property rather than two assertions that can drift.
+     *
+     * @param key an Ed25519 public key
+     * @return its raw 32-byte encoding: y little-endian, with the sign of x in the top bit
+     */
+    public static byte[] rawPublicKey(PublicKey key) {
+        EdECPoint point = ((EdECPublicKey) key).getPoint();
+
+        // toByteArray is big-endian and variably sized: it drops leading zero bytes and adds one if
+        // the top bit would otherwise read as a sign. Copy from the right-hand end of both.
+        byte[] bigEndian = point.getY().toByteArray();
+        byte[] littleEndian = new byte[PUBLIC_KEY_BYTES];
+        for (int i = 0; i < Math.min(bigEndian.length, PUBLIC_KEY_BYTES); i++) {
+            littleEndian[i] = bigEndian[bigEndian.length - 1 - i];
+        }
+
+        if (point.isXOdd()) {
+            littleEndian[PUBLIC_KEY_BYTES - 1] |= (byte) SIGN_BIT;
+        }
+        return littleEndian;
+    }
+
+    /**
      * Checks a signature.
      *
      * <p>Returns false rather than throwing for every way a signature can fail to verify, including
-     * a malformed one. The caller's response is identical in all of them — refuse to sign — and a
-     * verifier whose two outcomes are "false" and "an exception the caller must remember to catch"
-     * is a verifier that will eventually be used without the catch.
+     * a malformed one. The caller's response is identical in all of them — refuse — and a verifier
+     * whose two outcomes are "false" and "an exception the caller must remember to catch" is a
+     * verifier that will eventually be used without the catch.
      *
-     * @param key the approver's public key, from this service's own trusted list
+     * @param key the approver's public key, from the verifier's own records
      * @param message the canonical bytes that should have been signed
      * @param signature the 64 signature bytes
      * @return true only if this key signed exactly these bytes

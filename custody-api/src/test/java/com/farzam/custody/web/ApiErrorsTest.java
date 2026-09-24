@@ -24,12 +24,11 @@ import org.springframework.http.ResponseEntity;
 /**
  * The exception-to-status-and-code table, asserted directly.
  *
- * <p>{@code WithdrawalApiIntegrationTest} already drives most of these through real HTTP, which is
- * the better test where it is possible. It is not possible for all of them: an illegal state
- * transition only becomes reachable over the wire in M3, and ledger contention needs the optimistic
- * strategy under load. Both are in the contract already — it lists the {@code 409} and the
- * {@code 503} — so they are pinned down here rather than left until something happens to exercise
- * them.
+ * <p>{@code WithdrawalApiIntegrationTest} and {@code ApprovalApiIntegrationTest} already drive most
+ * of these through real HTTP, which is the better test where it is possible. It is not possible for
+ * all of them: ledger contention needs the optimistic strategy under load. It is in the contract
+ * already — the {@code 503} is listed — so it is pinned down here rather than left until something
+ * happens to exercise it.
  *
  * <p>No Spring context: the advice is a plain object and its handlers are plain methods.
  */

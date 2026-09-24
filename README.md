@@ -59,7 +59,7 @@ flowchart LR
 
 | Module | Owns |
 | --- | --- |
-| `common` | The Kafka event contract. Deliberately has no Spring dependency. |
+| `common` | The Kafka event contract, and the Ed25519 verification both services share. Deliberately has no Spring dependency. |
 | `custody-api` | Clients, the double-entry ledger, withdrawals, the REST API. |
 | `signer` | Wallet keys. The only component that can sign. |
 
@@ -123,10 +123,12 @@ YAML and the controller stops compiling.
 | --- | --- | --- |
 | `POST /v1/withdrawals` | Request a withdrawal. Header `Idempotency-Key` required. | `202` + `Location` |
 | `GET /v1/withdrawals/{id}` | Current state and transaction hash | `200` |
+| `POST /v1/withdrawals/{id}/approvals` | Record one approver's Ed25519 sign-off | `201` |
 | `GET /v1/accounts/{id}` | Balance | `200` |
 | `POST /v1/clients/{id}/whitelist` | Allow a destination address | `201` |
 | `POST /dev/deposits` | Seed a balance. Mapped only under the `dev` profile. | `201` |
-| `POST /dev/withdrawals/{id}/approve` | Approve without approvers, standing in for M3. `dev` profile only. | `200` |
+| `POST /dev/approvers` | Register an approver's public key. `dev` profile only. | `201` |
+| `POST /dev/withdrawals/{id}/approve` | Approve with nobody approving, so the signer's refusal can be seen by hand. `dev` profile only. | `200` |
 
 **Amounts are strings.** A JSON number is a double in most parsers, which loses
 precision above 2^53; one ETH is 10^18 wei. Every amount in this API is a decimal
@@ -165,6 +167,74 @@ Why the contract generates the code, and why the idempotency key is enforced by 
 unique index rather than a look-up:
 [ADR 0003](docs/adr/0003-idempotency-keys-are-backed-by-a-unique-index.md) and
 [ADR 0004](docs/adr/0004-the-openapi-contract-generates-the-interfaces.md).
+
+## Approvals
+
+Four eyes, and the rule that the party asking for the money does not get to be the
+party that agrees to send it.
+
+```mermaid
+flowchart LR
+    A[Approver] -->|signs the statement| E[POST .../approvals]
+    E --> V{verify against<br/>the registered key}
+    V -->|no| R[422, nothing recorded]
+    V -->|yes| S[(approvals row)]
+    S --> Q{enough<br/>approvers?}
+    Q -->|no| W[still PENDING_APPROVAL]
+    Q -->|yes| P[APPROVED + outbox row<br/>one transaction]
+```
+
+| Amount | Approvers needed |
+| --- | --- |
+| below 1 ETH | one |
+| 1 ETH and above | two distinct approvers |
+
+**What gets signed is not the request.** An approver signs an
+[`ApprovalStatement`](common/src/main/java/com/farzam/events/ApprovalStatement.java) —
+withdrawal id, destination, amount — and the server rebuilds that statement from its own
+record of the withdrawal before verifying. So a signature over terms the caller chose
+cannot be recorded against a withdrawal with different ones, and a destination edited
+after the fact invalidates every signature over it. Three fields and no more, because
+anything else in a signature's scope is something an approver would be endorsing without
+having been shown it.
+
+**Quorum counts approvers, not approvals.** The primary key on `approvals` is
+`(withdrawal_id, approver_id)`, so one person cannot satisfy a two-approver quorum by
+sending their valid signature twice — which is a copy and a paste away and would defeat
+the whole exercise. The signer enforces the same rule independently, with a set of ids,
+because it does not get to assume this table exists.
+
+**Self-approval is defined against the client, not the requester.** There is no
+authentication yet, so nothing identifies who *asked* for a withdrawal. What can be
+expressed is whose money it is: an approver registered with a `client_id` acts for that
+client and is refused on that client's withdrawals, while custodian staff have no client
+and may approve anything. That is the honest version of the rule available today, and it
+survives authentication arriving later.
+
+**The approval endpoint is write-only, and the order of its checks is deliberate.** There
+is no `GET .../approvals` — who has approved a payment is not something an
+unauthenticated API should read out. And the signature is verified before anything is
+said about self-approval or about who has already approved, so that every fact this
+endpoint discloses beyond "that approver is unknown" costs a valid signature to obtain.
+
+**The row is locked while an approval is counted.** Two approvals arriving at the same
+instant on a withdrawal that needs two is the case that matters: without
+`SELECT … FOR UPDATE` both read one existing approval, both conclude the quorum is short,
+and a fully approved withdrawal waits forever for a third signature nobody will send.
+Optimistic locking would catch the opposite race but resolve it by discarding a signature
+somebody meant to give. Delete the lock and `ApprovalConcurrencyTest` fails.
+
+**The quorum is then checked again by the signer, and the duplication is the point.** This
+service enforces the rule so an honest system refuses early, with an error a client can
+act on, rather than holding funds until a refusal comes back over Kafka. The signer
+enforces it from its own configuration and its own trusted keys, because if it trusted
+this count then owning custody-api would be enough to move funds. The approver registry is
+a table here — people join and leave — and configuration there, because a list a running
+system can edit is a list an attacker who owns that system can edit.
+
+Why it is enforced twice, why the two registries are deliberately asymmetric, and what
+happens when their thresholds disagree:
+[ADR 0010](docs/adr/0010-the-quorum-is-enforced-twice-from-two-different-registries.md).
 
 ## Events
 
@@ -358,31 +428,72 @@ WITHDRAWAL=$(curl -s localhost:8080/v1/withdrawals -H 'Content-Type: application
   -d "{\"accountId\":\"$ACCOUNT\",\"destination\":\"$DEST\",\"amountWei\":\"400000000000000000\"}" | jq -r .id)
 
 curl -s localhost:8080/v1/accounts/$ACCOUNT   # 600000000000000000 — 0.4 is held
-
-curl -s -XPOST localhost:8080/dev/withdrawals/$WITHDRAWAL/approve   # status APPROVED
 ```
 
 Send the withdrawal request twice with the same `Idempotency-Key` and the balance
 still reads 0.6: the retry returns the original withdrawal and holds nothing extra.
 
-The approval writes an outbox row, and the relay publishes it within about half a
-second. Watch it leave:
+Now approve it, which needs an approver with a real key pair:
+
+```bash
+openssl genpkey -algorithm ed25519 -out /tmp/alice.pem
+
+# The raw 32 bytes, which is what the registry and the signer both hold. An Ed25519
+# SubjectPublicKeyInfo is a fixed twelve-byte DER prefix and then the key, so the
+# last 32 bytes of the DER form are the key itself.
+PUBKEY=$(openssl pkey -in /tmp/alice.pem -pubout -outform DER | tail -c 32 | base64)
+
+APPROVER=$(curl -s localhost:8080/dev/approvers -H 'Content-Type: application/json' \
+  -d "{\"name\":\"alice\",\"publicKey\":\"$PUBKEY\"}" | jq -r .id)
+
+# Exactly the bytes the server will rebuild and verify against: three keys, sorted,
+# no whitespace, and no trailing newline. Get any of that wrong and the signature is
+# over a different document, which is the whole idea.
+printf '{"amountWei":"400000000000000000","destination":"%s","withdrawalId":"%s"}' \
+  "$DEST" "$WITHDRAWAL" > /tmp/statement.json
+
+SIGNATURE=$(openssl pkeyutl -sign -rawin -inkey /tmp/alice.pem -in /tmp/statement.json | base64)
+
+curl -s localhost:8080/v1/withdrawals/$WITHDRAWAL/approvals -H 'Content-Type: application/json' \
+  -d "{\"approverId\":\"$APPROVER\",\"signature\":\"$SIGNATURE\"}"
+# {"collected":1,"required":1,"status":"APPROVED", …} — 0.4 ETH is below the
+# four-eyes threshold, so one approver is the quorum
+```
+
+Change a digit of the amount in `statement.json` and the same call returns `422` with
+`"code":"INVALID_APPROVAL_SIGNATURE"`: the server signs off on what it holds, not on
+what was sent. Try 2 ETH instead of 0.4 and the first approval comes back
+`"collected":1,"required":2` — and submitting the same approver's signature again is a
+`409`, because a quorum counts people.
+
+The approval writes an outbox row in the same transaction as the status change, and the
+relay publishes it within about half a second. Watch it leave:
 
 ```bash
 docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 --topic custody.withdrawals.v1 --from-beginning
 ```
 
-The signer consumes it — and refuses it, which is correct. It re-verifies the
-approvals against its own trusted keys, and until M3 exists custody-api publishes
-an empty `approvals` list, so the answer is always no. Approving the same
-withdrawal a second time returns `409`: the state machine has no
-`APPROVED → APPROVED` edge, so there is no second event either.
+The signer consumes it — and still refuses it, unless you have also put Alice's public
+key in *its* configuration:
 
-To see the signer say yes you need an approver it trusts, which for now means the
-integration tests — `SignerEndToEndTest` generates an Ed25519 key pair, configures
-it as trusted, funds a wallet on Anvil and drives the whole path through to a mined
-transaction.
+```bash
+SIGNER_POLICY_TRUSTED_APPROVERS_0_ID=$APPROVER \
+SIGNER_POLICY_TRUSTED_APPROVERS_0_PUBLIC_KEY=$PUBKEY \
+  ./gradlew :signer:bootRun
+```
+
+That second step is not friction to be smoothed away, it is the design. The signer
+verifies against keys that arrived with its deployment and never reads custody's
+`approvers` table, so an attacker who owns custody-api completely can register
+themselves as an approver, sign their own withdrawal, and get exactly as far as a
+refusal. `POST /dev/withdrawals/{id}/approve` is still there to demonstrate the same
+thing from the other direction: it approves with nobody approving, publishes an event
+with an empty `approvals` list, and the signer says no.
+
+`SignerEndToEndTest` drives the whole path in one process — it generates a key pair,
+configures it as trusted, funds a wallet on Anvil and follows a withdrawal through to a
+mined transaction.
 
 Tests use [Testcontainers](https://testcontainers.com/), so they start their own
 throwaway Postgres, Kafka and Anvil and do not need the Compose stack running. A
@@ -459,7 +570,7 @@ Useful invocations:
 | ✅ | **M2** Withdrawal API | API-first OpenAPI contract, idempotency keys, RFC 9457 errors |
 | ✅ | **M4** Outbox and Kafka | Transactional outbox, `SKIP LOCKED` relay, idempotent consumers, DLT |
 | ✅ | **M5** Signer | Envelope encryption, nonce management, EIP-1559 signing and broadcast |
-| ⬜ | **M3** Approvals | Ed25519 four-eyes approval with amount-based quorum |
+| ✅ | **M3** Approvals | Ed25519 four-eyes approval with amount-based quorum |
 | ⬜ | **M6** Confirmations | Receipt polling, settlement, reconciliation against the chain |
 
 ## What a production system would do differently

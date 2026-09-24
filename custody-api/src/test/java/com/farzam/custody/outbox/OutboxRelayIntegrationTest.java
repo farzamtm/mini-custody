@@ -110,7 +110,7 @@ class OutboxRelayIntegrationTest extends AbstractKafkaTest {
         assertThat(payload.withdrawalId()).isEqualTo(withdrawal.getId());
         assertThat(payload.destination()).isEqualTo(DESTINATION);
         assertThat(payload.amountWei()).isEqualTo(POINT_FOUR_ETH);
-        assertThat(payload.approvals()).as("nobody has approved anything yet; M3 fills this in").isEmpty();
+        assertThat(payload.approvals()).as("this fixture approves with nobody approving").isEmpty();
     }
 
     @Test
@@ -204,7 +204,10 @@ class OutboxRelayIntegrationTest extends AbstractKafkaTest {
         UUID accountId = deposits.deposit(clientId, ONE_ETH).getId();
         Withdrawal requested = withdrawals
                 .request(new WithdrawalCommand(accountId, DESTINATION, POINT_FOUR_ETH, UUID.randomUUID().toString()));
-        return approvals.approve(requested.getId()).orElseThrow();
+        // No approvals: these tests are about the relay moving a row to Kafka, and the evidence on
+        // the event is not what they are asking about. Collecting real signatures here would make
+        // every assertion about the outbox depend on the approval path as well.
+        return approvals.approve(requested.getId(), List.of()).orElseThrow();
     }
 
     private Object publishedAtOf(UUID withdrawalId) {

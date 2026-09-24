@@ -39,6 +39,14 @@ servers:
 tags:
   - name: withdrawals
     description: Requesting withdrawals and following their state.
+  - name: approvals
+    description: |
+      Four-eyes sign-off on a withdrawal. Its own tag rather than part of
+      `withdrawals`, for the reason `dev-withdrawals` is separate: `useTags`
+      generates one interface per tag and one controller implements each, and two
+      controllers cannot implement the same interface without mapping the same
+      path twice. The operation is about a withdrawal but the code that decides it
+      is the approval package's.
   - name: accounts
     description: Reading ledger balances.
   - name: clients
@@ -54,6 +62,13 @@ tags:
       interface per tag and one controller implements each: these operations act
       on withdrawals and belong next to the withdrawal code, not next to the
       ledger's simulated deposits.
+  - name: dev-approvers
+    description: |
+      The same `dev` profile again, and its own tag for the same reason: seeding
+      the approver registry belongs next to the approval code. Unlike the other
+      two, what this stands in for is not a chain event but an onboarding process
+      — approvers are people, and in a real deployment they do not arrive over
+      HTTP.
 
 paths:
   /v1/withdrawals:
@@ -132,6 +147,86 @@ paths:
                 $ref: '#/components/schemas/Withdrawal'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  /v1/withdrawals/{withdrawalId}/approvals:
+    post:
+      tags: [approvals]
+      operationId: approveWithdrawal
+      summary: Record one approver's sign-off
+      description: |
+        Four eyes. An approver signs a statement of what they are agreeing to —
+        the withdrawal id, the destination and the amount — and posts the
+        signature here. The server rebuilds that statement from its own record of
+        the withdrawal and verifies the signature against the approver's
+        registered public key, so a signature over terms the caller chose cannot
+        be recorded against a withdrawal with different ones.
+
+        The statement is the canonical JSON of:
+
+        ```json
+        {"amountWei":"400000000000000000","destination":"0x7099…79c8","withdrawalId":"…"}
+        ```
+
+        Canonical means keys sorted, no whitespace, amounts as decimal strings.
+        Both this service and the signer recompute those bytes rather than
+        trusting any that travel, because the payload is stored as `jsonb` on the
+        way through and Postgres does not preserve `jsonb` byte for byte.
+
+        How many approvers an amount needs is configuration: two at or above one
+        ETH, one below it. When the last one arrives the withdrawal moves to
+        `APPROVED` and the `WithdrawalApproved` event is written to the outbox in
+        the same transaction — so the response saying `collected == required` and
+        the signer being told are one atomic fact rather than two.
+
+        The quorum is enforced again by the signer, from its own configuration and
+        against its own list of trusted keys. Compromising this service is
+        therefore not enough to move funds.
+      parameters:
+        - name: withdrawalId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalRequest'
+      responses:
+        '201':
+          description: |
+            The approval is recorded. Compare `collected` with `required`, or read
+            `status`, to see whether it was the one that completed the quorum.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Approval'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Either this approver has already approved this withdrawal
+            (`ALREADY_APPROVED`), or the withdrawal is no longer waiting for
+            approval (`ILLEGAL_STATE_TRANSITION`). Neither is a retry that can be
+            made to succeed.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: |
+            The approval cannot be accepted: the approver is not registered
+            (`UNKNOWN_APPROVER`), the signature is not theirs over this withdrawal
+            (`INVALID_APPROVAL_SIGNATURE`), or they act for the client whose money
+            this is (`SELF_APPROVAL`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
 
   /v1/accounts/{accountId}:
     get:
@@ -214,6 +309,53 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
 
+  /dev/approvers:
+    post:
+      tags: [dev-approvers]
+      operationId: registerApprover
+      summary: Register an approver and their public key
+      description: |
+        Adds a row to the approver registry, which is what
+        `POST /v1/withdrawals/{id}/approvals` verifies signatures against.
+
+        In a real deployment approvers arrive through whatever process onboards a
+        person who can authorise payments — an identity provider, a ceremony, a
+        change request with two signatures on it — and never through an
+        unauthenticated HTTP call. This endpoint exists so the local walk-through
+        in the README can generate a key pair and use it, and it is mapped only
+        under the `dev` profile: the bean is not created otherwise and the path
+        returns `404`.
+
+        Note what registering an approver here does **not** do. The signer keeps
+        its own list of trusted keys in configuration and never reads this table,
+        so an approver added here can satisfy this service's quorum and still be
+        refused by the signer. That is the intended asymmetry: an approver list a
+        running system can edit is one an attacker who owns that system can edit,
+        and the component holding the private keys must not have one.
+
+        `clientId` is the self-approval control. Leave it null for custodian staff,
+        who are independent of every client; set it to a client id for somebody who
+        acts for that client, and they will be refused on that client's own
+        withdrawals.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApproverRequest'
+      responses:
+        '201':
+          description: |
+            Registered. The response does not echo the public key: it is already
+            the caller's, and a registry that reads keys back out is one more way
+            to enumerate them.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Approver'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
   /dev/withdrawals/{withdrawalId}/approve:
     post:
       tags: [dev-withdrawals]
@@ -224,11 +366,13 @@ paths:
         `WithdrawalApproved` event to the outbox, in one transaction. The relay
         publishes it to `custody.withdrawals.v1` within about half a second.
 
-        This is a stand-in for `POST /v1/withdrawals/{id}/approvals`, which
-        arrives in M3 with Ed25519 signature verification, self-approval
-        rejection and an amount-based quorum. It exists so that the outbox, the
-        relay and the signer can be built and demonstrated before the approval
-        machinery does, and it takes no body precisely because it checks nothing.
+        Superseded by `POST /v1/withdrawals/{id}/approvals`, which does the real
+        thing: Ed25519 signature verification, self-approval rejection and an
+        amount-based quorum. This one is kept because it is the only way to
+        produce a `WithdrawalApproved` that the signer *should* refuse, and
+        "bypassing the approval endpoint does not bypass the approvals" is worth
+        being able to demonstrate by hand. It takes no body precisely because it
+        checks nothing, and the event it writes carries an empty `approvals` list.
 
         Mapped only under the `dev` profile. It is the endpoint that would turn a
         request for somebody else's money into an approved one, so in any
@@ -433,6 +577,102 @@ components:
           type: string
           description: Stored and returned in lower case, whatever case it arrived in.
           example: '0x70997970c51812dc3a010c7d01b50e0d17dc79c8'
+
+    ApprovalRequest:
+      type: object
+      required: [approverId, signature]
+      properties:
+        approverId:
+          type: string
+          format: uuid
+          description: |
+            Which approver is signing off. Used to look up the public key the
+            signature is checked against — the request does not carry a key, and
+            could not usefully: verifying a signature against a key supplied
+            alongside it is arithmetic that always succeeds.
+        signature:
+          $ref: '#/components/schemas/Ed25519Signature'
+
+    Approval:
+      type: object
+      required: [withdrawalId, approverId, collected, required, status]
+      properties:
+        withdrawalId:
+          type: string
+          format: uuid
+        approverId:
+          type: string
+          format: uuid
+        collected:
+          type: integer
+          description: How many distinct approvers have now signed off.
+          example: 1
+        required:
+          type: integer
+          description: |
+            How many this amount needs. Two at or above the configured four-eyes
+            threshold, one below it.
+          example: 2
+        status:
+          $ref: '#/components/schemas/WithdrawalStatus'
+
+    ApproverRequest:
+      type: object
+      required: [name, publicKey]
+      properties:
+        name:
+          type: string
+          description: Who they are, for a human reading an audit trail.
+          minLength: 1
+          maxLength: 255
+          example: alice
+        publicKey:
+          $ref: '#/components/schemas/Ed25519PublicKey'
+        clientId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The client this approver acts for, or null for custodian staff. An
+            approver with a client set cannot approve that client's own
+            withdrawals.
+
+    Approver:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: alice
+        clientId:
+          type: string
+          format: uuid
+          nullable: true
+
+    Ed25519PublicKey:
+      type: string
+      description: |
+        A raw Ed25519 public key: the 32 bytes as they travel, base64. Not PEM and
+        not an X.509 wrapper — the raw form is what the signer's configuration
+        holds and what an approval carries, and one encoding everywhere is one
+        fewer place for the two services to disagree about what they are verifying.
+      pattern: '^[A-Za-z0-9+/]{43}=$'
+      # Deliberately 32 bytes of ASCII rather than a real key. A well-formed
+      # example would be forty-four characters of high entropy sitting next to the
+      # word "key", which is what a secret scanner is built to find, and teaching
+      # people to allowlist the scanner is worse than a less realistic example.
+      example: 'bm90LWEtcmVhbC1rZXktLXBsYWNlaG9sZGVyLW9ubHk='
+
+    Ed25519Signature:
+      type: string
+      description: |
+        A raw Ed25519 signature: 64 bytes, base64. The pattern pins the length,
+        because a signature of the wrong size is a malformed request rather than a
+        failed verification, and the two deserve different status codes.
+      pattern: '^[A-Za-z0-9+/]{86}==$'
 
     DepositRequest:
       type: object

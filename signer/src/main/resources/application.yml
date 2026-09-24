@@ -73,9 +73,16 @@ signer:
     # for the amounts that justify it.
     second-approval-from-wei: "1000000000000000000" # 1 ETH
     # Every approver this service will accept a signature from, by id and raw
-    # Ed25519 public key. Empty until M3 can produce signed approvals — which
-    # means the signer currently refuses every withdrawal custody-api can
-    # publish, and that is the correct behaviour rather than a gap.
+    # Ed25519 public key. Same number as custody-api's `second-approval-from-wei`
+    # above it, and see ADR 0010 for why that duplication is the security model.
+    #
+    # Empty here, and empty means this service refuses every withdrawal. That is
+    # the correct default rather than a gap: custody-api keeps its approvers in a
+    # table that can be added to at runtime, and if this list were derived from
+    # that one then owning custody-api would be enough to move funds. This list
+    # arrives with the deployment instead, so filling it in is a deliberate act by
+    # whoever deploys the signer. The README shows it being set from the
+    # environment for a local run.
     trusted-approvers: []
 
   broadcast:

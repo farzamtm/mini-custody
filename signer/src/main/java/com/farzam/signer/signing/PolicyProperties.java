@@ -9,11 +9,13 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * The limits the signer applies to everything it is asked to sign.
  *
  * <p><b>These live here and not in custody-api, and the duplication is the security model.</b>
- * custody-api enforces the same quorum before it publishes anything — that is M3 — and if the signer
+ * custody-api enforces the same quorum before it publishes anything, from
+ * {@code ApprovalProperties} and an {@code approvers} table it can add to at runtime. If the signer
  * trusted it to have done so, then compromising custody-api would be enough to move funds. The
  * signer re-checks from its own configuration, against its own list of public keys, so an attacker
  * who owns the API completely can put whatever they like in an event and still needs a private key
- * they have never had.
+ * they have never had. ADR 0010 covers the asymmetry and what happens when the two thresholds
+ * disagree.
  *
  * @param maxTransactionWei the hot-wallet cap: the most this service will sign in one transaction,
  *     whatever the approvals say. A hot wallet is online and automated by definition, so the amount
@@ -24,7 +26,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *     expensive enough to be routinely bypassed protects nothing, so the expensive rule is reserved
  *     for the amounts that justify it.
  * @param trustedApprovers every approver this service will accept a signature from. An empty list is
- *     valid and means the signer refuses everything, which is the correct state before M3 exists.
+ *     valid and means the signer refuses everything, which is the right default for a list that must
+ *     never be derived from custody-api's.
  */
 @ConfigurationProperties("signer.policy")
 public record PolicyProperties(BigInteger maxTransactionWei, BigInteger secondApprovalFromWei,

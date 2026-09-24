@@ -1,5 +1,10 @@
 package com.farzam.custody.web;
 
+import com.farzam.custody.approval.AlreadyApprovedException;
+import com.farzam.custody.approval.InvalidApprovalSignatureException;
+import com.farzam.custody.approval.MalformedPublicKeyException;
+import com.farzam.custody.approval.SelfApprovalException;
+import com.farzam.custody.approval.UnknownApproverException;
 import com.farzam.custody.chain.MalformedAddressException;
 import com.farzam.custody.ledger.InsufficientFundsException;
 import com.farzam.custody.ledger.LedgerContentionException;
@@ -81,7 +86,68 @@ class ApiErrors extends ResponseEntityExceptionHandler {
                 failure.getMessage());
     }
 
+    /**
+     * The same approver, twice, on the same withdrawal.
+     *
+     * <p>Debug, not warn. An approver refreshing a page or retrying a request that timed out is an
+     * ordinary thing to do, and the primary key turning it into a {@code 409} is the system working.
+     */
+    @ExceptionHandler(AlreadyApprovedException.class)
+    ProblemDetail alreadyApproved(AlreadyApprovedException failure) {
+        LOG.debug("a duplicate approval was refused", failure);
+        return problem(
+                HttpStatus.CONFLICT,
+                "Already approved",
+                "ALREADY_APPROVED",
+                "this approver has already approved this withdrawal");
+    }
+
     // ---- 422 ---------------------------------------------------------------
+
+    /**
+     * A signature that is not what it claims to be.
+     *
+     * <p>Logged at warn with the cause, which names the approver and the withdrawal — somebody
+     * should look at a failed approval, because the honest explanations for one are a client bug and
+     * an attempt to forge a sign-off, and only the log can tell them apart. The response says none of
+     * it: which of the several ways a signature can fail applied here is information about how close
+     * a forgery got.
+     */
+    @ExceptionHandler(InvalidApprovalSignatureException.class)
+    ProblemDetail invalidApprovalSignature(InvalidApprovalSignatureException failure) {
+        LOG.warn("an approval signature did not verify", failure);
+        return problem(
+                HttpStatus.UNPROCESSABLE_CONTENT,
+                "Invalid approval signature",
+                "INVALID_APPROVAL_SIGNATURE",
+                "the signature is not this approver's signature over this withdrawal");
+    }
+
+    @ExceptionHandler(UnknownApproverException.class)
+    ProblemDetail unknownApprover(UnknownApproverException failure) {
+        return problem(
+                HttpStatus.UNPROCESSABLE_CONTENT,
+                "Unknown approver",
+                "UNKNOWN_APPROVER",
+                "the request names an approver that is not registered");
+    }
+
+    /**
+     * Four eyes, not two keys.
+     *
+     * <p>Worth a warning: it means an approver registered against a client tried to approve that
+     * client's own withdrawal, which is either a misconfigured registry or somebody testing where
+     * the line is. Neither should be silent.
+     */
+    @ExceptionHandler(SelfApprovalException.class)
+    ProblemDetail selfApproval(SelfApprovalException failure) {
+        LOG.warn("a self-approval was refused", failure);
+        return problem(
+                HttpStatus.UNPROCESSABLE_CONTENT,
+                "Self-approval",
+                "SELF_APPROVAL",
+                "an approver cannot approve a withdrawal belonging to the client they act for");
+    }
 
     @ExceptionHandler(AddressNotWhitelistedException.class)
     ProblemDetail notWhitelisted(AddressNotWhitelistedException failure) {
@@ -127,6 +193,18 @@ class ApiErrors extends ResponseEntityExceptionHandler {
     @ExceptionHandler(MalformedAddressException.class)
     ProblemDetail malformedAddress(MalformedAddressException failure) {
         return problem(HttpStatus.BAD_REQUEST, "Malformed address", "MALFORMED_ADDRESS", failure.getMessage());
+    }
+
+    /**
+     * Bytes offered as a public key that are not one.
+     *
+     * <p>{@code failure.getMessage()} crosses, unlike the signature case above. A public key is
+     * public and its length is not a secret, so "an Ed25519 public key is 32 bytes, got 31" is the
+     * whole of what somebody registering an approver needs in order to fix their paste.
+     */
+    @ExceptionHandler(MalformedPublicKeyException.class)
+    ProblemDetail malformedPublicKey(MalformedPublicKeyException failure) {
+        return problem(HttpStatus.BAD_REQUEST, "Malformed public key", "MALFORMED_PUBLIC_KEY", failure.getMessage());
     }
 
     /**

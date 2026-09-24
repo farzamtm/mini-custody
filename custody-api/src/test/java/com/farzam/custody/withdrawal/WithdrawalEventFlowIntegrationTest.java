@@ -42,7 +42,9 @@ import org.springframework.test.web.servlet.assertj.MvcTestResult;
  * from a database row to a state change on its own.
  *
  * <p>{@code @ActiveProfiles("dev")} for two endpoints that only exist under it: deposits, which is
- * how a balance comes into being, and the approval stand-in, which is what M3 will replace.
+ * how a balance comes into being, and the approval stand-in, which is used here rather than the real
+ * approval endpoint because nothing in this file is about who signed. What an approved withdrawal
+ * with genuine signatures on it looks like is {@code ApprovalEventFlowIntegrationTest}.
  *
  * <p>Every test uses a fresh client and a fresh withdrawal, so tests can share a broker and a
  * database without sharing state. Assertions about {@code PENDING_OUT}, which is a singleton, are

@@ -3,6 +3,7 @@ package com.farzam.custody.withdrawal;
 import com.farzam.custody.api.DevWithdrawalsApi;
 import com.farzam.custody.api.model.WithdrawalDto;
 import com.farzam.custody.web.NotFoundException;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.ResponseEntity;
@@ -23,8 +24,11 @@ import org.springframework.web.bind.annotation.RestController;
  * against its own trusted keys, so the event this produces carries no approvals and the signer will
  * refuse it. Bypassing the approval endpoint does not bypass the approvals.
  *
- * <p>Replaced in M3 by the real endpoint, which will call the same
- * {@link WithdrawalApprovalService#approve} after it has verified a quorum of signatures.
+ * <p>Superseded by {@code POST /v1/withdrawals/{id}/approvals}, which reaches the same
+ * {@link WithdrawalApprovalService#approve} once it has verified a quorum of real signatures. Kept
+ * rather than deleted, because it is the only way to produce a {@code WithdrawalApproved} that the
+ * signer should refuse, and "the signer refuses an approval nobody signed" is a property worth being
+ * able to demonstrate by hand as well as in a test.
  */
 @RestController
 @Profile("dev")
@@ -38,7 +42,12 @@ class DevApprovalController implements DevWithdrawalsApi {
 
     @Override
     public ResponseEntity<WithdrawalDto> simulateApproval(UUID withdrawalId) {
-        Withdrawal withdrawal = approvals.approve(withdrawalId)
+        // An empty list, still, now that the real endpoint exists. This one approves without any
+        // approver having approved, so it has nothing to put here and must not invent anything: the
+        // signer verifies signatures against its own trusted keys, and an event from this path
+        // carries none, so it is refused. That is what keeps a dev endpoint that authorises real
+        // money from being a way around the control it skips.
+        Withdrawal withdrawal = approvals.approve(withdrawalId, List.of())
                 .orElseThrow(() -> NotFoundException.withdrawal(withdrawalId));
         // 200 rather than 202: unlike requesting a withdrawal, approving one is finished when the
         // call returns. The event still has to be relayed, but that is this service's own bookkeeping

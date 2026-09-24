@@ -167,13 +167,12 @@ why — not only what was chosen. Link it from the README section it belongs to.
 
 | Module | Owns |
 | --- | --- |
-| `common` | The Kafka event contract. Deliberately has no Spring dependency — do not add one. |
-| `custody-api` | Clients, the double-entry ledger, withdrawals, the REST API. |
+| `common` | The Kafka event contract, and the Ed25519 verification both services share. Deliberately has no Spring dependency — do not add one. |
+| `custody-api` | Clients, the double-entry ledger, withdrawals, approvals, the REST API. |
 | `signer` | Wallet keys. The only component that can sign. Has no web starter, and must not gain one. |
 
-Milestone status lives in the README's Milestones table. M5 (signer) and M3
-(approvals) and M6 (confirmations) are the remaining ones; update the table in the
-PR that lands each.
+Milestone status lives in the README's Milestones table. M6 (confirmations) is the
+last one outstanding; update the table in the PR that lands it.
 
 ## Running it locally
 
