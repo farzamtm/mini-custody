@@ -13,6 +13,7 @@ import com.farzam.custody.withdrawal.WithdrawalCommand;
 import com.farzam.custody.withdrawal.WithdrawalRepository;
 import com.farzam.custody.withdrawal.WithdrawalService;
 import java.math.BigInteger;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -175,7 +176,9 @@ class ConfirmationApiIntegrationTest extends AbstractChainTest {
     private Withdrawal broadcast(String txHash) {
         Withdrawal requested = withdrawals
                 .request(new WithdrawalCommand(accountId, DESTINATION, POINT_FOUR_ETH, UUID.randomUUID().toString()));
-        approvals.approve(requested.getId());
+        // No approvals: nothing in this file is about who signed off. What an approved withdrawal
+        // with genuine signatures on it looks like is ApprovalEventFlowIntegrationTest.
+        approvals.approve(requested.getId(), List.of());
         return transactions.execute(status -> {
             Withdrawal withdrawal = withdrawalRepository.findById(requested.getId()).orElseThrow();
             withdrawal.broadcastAs(txHash);

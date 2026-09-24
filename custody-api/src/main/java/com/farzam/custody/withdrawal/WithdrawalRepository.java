@@ -10,6 +10,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.jpa.repository.QueryHints;
+import org.springframework.data.repository.query.Param;
 
 /** Withdrawals by id, by the key their client chose for them, and by what the watcher has to check. */
 public interface WithdrawalRepository extends JpaRepository<Withdrawal, UUID> {
@@ -29,6 +30,28 @@ public interface WithdrawalRepository extends JpaRepository<Withdrawal, UUID> {
      * @return the withdrawal that key already created, if any
      */
     Optional<Withdrawal> findByClientIdAndIdempotencyKey(UUID clientId, String idempotencyKey);
+
+    /**
+     * The same look-up as {@code findById}, with {@code SELECT … FOR UPDATE} on the row.
+     *
+     * <p>For a caller that is about to decide something from what it reads and then write based on
+     * that decision — which is the approval path, where the decision is "does this complete the
+     * quorum". The alternative is the {@code @Version} column, and that is a different guarantee:
+     * optimistic locking detects the conflict after the fact and resolves it by rolling one
+     * transaction back, which for an approval means discarding a signature somebody meant to give.
+     * A lock makes the second caller wait and then read the truth. See
+     * {@link com.farzam.custody.approval.ApprovalService#submit} and ADR 0001.
+     *
+     * <p>Spelled out as a query rather than as {@code @Lock} on a derived method, because the
+     * derived {@code findById} is inherited from {@link JpaRepository} and annotating an override of
+     * it is a quiet way to change the behaviour of every existing caller.
+     *
+     * @param id the withdrawal to lock
+     * @return the withdrawal, with its row locked until the transaction ends
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select w from Withdrawal w where w.id = :id")
+    Optional<Withdrawal> findByIdForUpdate(@Param("id") UUID id);
 
     /**
      * The withdrawals the confirmation watcher has to ask the chain about, claimed for this

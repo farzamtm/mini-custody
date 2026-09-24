@@ -85,6 +85,19 @@ outbox:
     # transaction should not hold row locks for two minutes.
     ack-timeout: 5s
 
+approvals:
+  # Four eyes from 1 ETH up; one approver below it. A rule expensive enough to be
+  # routinely worked around protects nothing, so the expensive rule is kept for the
+  # amounts that justify it.
+  #
+  # This is the same number as `signer.policy.second-approval-from-wei`, and the
+  # duplication is the security model rather than an oversight: this service
+  # enforces the quorum before it publishes, and the signer enforces it again from
+  # its own configuration before it signs. If the signer trusted this count,
+  # owning this service would be enough to move funds. See ApprovalProperties for
+  # what happens when the two are set to different numbers.
+  second-approval-from-wei: "1000000000000000000" # 1 ETH
+
 # Bound to ChainProperties. custody-api only reads the chain — it holds no key and
 # cannot send anything; the signer does that.
 chain:

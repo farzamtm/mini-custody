@@ -125,7 +125,7 @@ than to discover them in a red run.
 | Spotless (Eclipse JDT) | Anything `./gradlew spotlessApply` would change |
 | Checkstyle | Unused imports, swallowed exceptions, `System.out`, methods over 12 branches, and **`float`/`double` anywhere** |
 | SpotBugs + find-sec-bugs | Null derefs, resource leaks, SQL injection, weak crypto, predictable RNG |
-| JaCoCo | Line coverage below 92% (`-PcoverageMinimum=0` to bypass temporarily, never in a commit) |
+| JaCoCo | Line coverage below 93%, per module (`-PcoverageMinimum=0` to bypass temporarily, never in a commit) |
 | Gitleaks | Credentials anywhere in history, including Ethereum private keys |
 | Trivy over the CycloneDX SBOM | A new fixable HIGH or CRITICAL CVE |
 
@@ -167,12 +167,13 @@ why — not only what was chosen. Link it from the README section it belongs to.
 
 | Module | Owns |
 | --- | --- |
-| `common` | The Kafka event contract. Deliberately has no Spring dependency — do not add one. |
-| `custody-api` | Clients, the double-entry ledger, withdrawals, the REST API. |
+| `common` | The Kafka event contract, and the Ed25519 verification both services share. Deliberately has no Spring dependency — do not add one. |
+| `custody-api` | Clients, the double-entry ledger, withdrawals, approvals, the REST API. |
 | `signer` | Wallet keys. The only component that can sign. Has no web starter, and must not gain one. |
 
-Milestone status lives in the README's Milestones table. M3 (approvals) is the last
-one outstanding; update the table in the PR that lands it.
+Milestone status lives in the README's Milestones table. M0 to M6 have all landed;
+anything from here is new work, and whatever defines it gets a row in that table
+and is ticked by the pull request that finishes it.
 
 ## Running it locally
 

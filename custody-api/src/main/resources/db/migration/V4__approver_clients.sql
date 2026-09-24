@@ -1,0 +1,24 @@
+-- Four eyes need two people, and V1 could not say who the first one was.
+--
+-- `approvers` and `approvals` have been in the schema since V1, waiting for the
+-- milestone that fills them. What V1 did not have is any way to express that an
+-- approver is not independent of the withdrawal in front of them, and without
+-- that, "four eyes" is only "two key pairs" — which one person holding both
+-- satisfies on their own.
+--
+-- client_id is who this approver acts for. Null means custodian staff, who are
+-- independent of every client and may approve anything. Non-null means the
+-- approver belongs to that client, and ApprovalService refuses their approval on
+-- that client's own withdrawals: the party asking for the money does not get to
+-- be the party that agrees to send it.
+--
+-- Nullable rather than defaulted, because the two values mean genuinely different
+-- things and there is no sensible stand-in for "we do not know". No foreign key:
+-- there is no `clients` table — a client is an id that appears on accounts and
+-- withdrawals — and a constraint pointing at nothing is a lie the schema tells.
+--
+-- No index either. The column is read from a row already fetched by its primary
+-- key, never searched on, and an index nothing queries is a write cost with no
+-- reader.
+alter table approvers
+  add column client_id uuid;

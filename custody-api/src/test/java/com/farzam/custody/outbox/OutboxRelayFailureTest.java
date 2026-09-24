@@ -12,6 +12,7 @@ import com.farzam.custody.withdrawal.WithdrawalCommand;
 import com.farzam.custody.withdrawal.WithdrawalService;
 import java.math.BigInteger;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.apache.kafka.clients.producer.ProducerConfig;
@@ -123,7 +124,9 @@ class OutboxRelayFailureTest extends AbstractPostgresTest {
         UUID accountId = deposits.deposit(clientId, ONE_ETH).getId();
         Withdrawal requested = withdrawals
                 .request(new WithdrawalCommand(accountId, DESTINATION, POINT_FOUR_ETH, UUID.randomUUID().toString()));
-        return approvals.approve(requested.getId()).orElseThrow();
+        // No approvals: this test is about what the relay does when a send fails, not about who
+        // signed off.
+        return approvals.approve(requested.getId(), List.of()).orElseThrow();
     }
 
     private Object publishedAtOf(UUID withdrawalId) {

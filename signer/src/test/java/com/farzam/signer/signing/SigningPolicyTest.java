@@ -194,9 +194,9 @@ class SigningPolicyTest {
     }
 
     /**
-     * The state the signer is in before M3 exists, and the reason M5 could be built against an
-     * M4-era custody-api without weakening anything: every event it can produce carries no
-     * approvals, and every one of them is refused.
+     * The state a freshly deployed signer is in, and the whole of why custody-api's approver table
+     * cannot be used to move funds: an approval list that does not appear in <em>this</em>
+     * configuration counts for nothing, however well signed it is.
      */
     @Test
     void aSignerWithNoTrustedApproversRefusesEverything() {

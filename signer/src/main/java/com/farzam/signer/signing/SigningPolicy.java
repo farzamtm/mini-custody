@@ -1,8 +1,8 @@
 package com.farzam.signer.signing;
 
+import com.farzam.crypto.Ed25519;
 import com.farzam.events.ApprovalStatement;
 import com.farzam.events.WithdrawalApproved;
-import com.farzam.signer.crypto.Ed25519;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.math.BigInteger;
 import java.security.PublicKey;
@@ -67,9 +67,9 @@ public final class SigningPolicy {
         this.properties = properties;
         this.trusted = parse(properties);
         if (trusted.isEmpty()) {
-            // Not an error — it is the correct state until M3 can produce signed approvals — but it
-            // means every withdrawal will be refused, and that should be visible on startup rather
-            // than discovered one refusal at a time.
+            // Not an error — an empty list is the safe default, and it is what a fresh deployment
+            // has — but it means every withdrawal will be refused, and that should be visible on
+            // startup rather than discovered one refusal at a time.
             LOG.warn("no trusted approvers are configured; every withdrawal will be refused");
         }
     }

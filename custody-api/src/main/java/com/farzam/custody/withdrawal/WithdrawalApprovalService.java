@@ -13,11 +13,15 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * Moves a withdrawal to {@code APPROVED} and tells the signer, atomically.
  *
- * <p>This is the seam M3 plugs into. When the approvals endpoint exists it will verify Ed25519
- * signatures, reject self-approval and count the quorum, and then call {@link #approve} — the
- * transition and its announcement do not change, only the decision in front of them does. M4 reaches
- * it through a dev-profile endpoint instead, so the outbox, the relay and the signer can be built
- * and demonstrated before the approval machinery exists.
+ * <p>The transition and its announcement, and nothing else. Who is allowed to approve, whether their
+ * signatures verify and how many of them an amount needs are all
+ * {@link com.farzam.custody.approval.ApprovalService}'s business, and it calls this once it has an
+ * answer. M4's dev endpoint reaches the same method with an empty list, which is why the outbox, the
+ * relay and the signer could be built and demonstrated before the approval machinery existed.
+ *
+ * <p>Keeping the two apart is what lets the dev endpoint stay honest. It can skip the approvals but
+ * it cannot fabricate them, so the event it produces carries none and the signer refuses it —
+ * bypassing the approval endpoint does not bypass the approvals.
  *
  * <p>There is no second bean here, unlike {@code WithdrawalWriter} next to {@code WithdrawalService}.
  * That split exists so a caller can react to its own transaction failing; nothing here needs to.
@@ -42,12 +46,14 @@ public class WithdrawalApprovalService {
      * will ever tell the signer, and none at which the signer has been told about an approval that
      * was rolled back.
      *
-     * <p><b>Two approvals arriving at once produce one event.</b> Both transactions read the
-     * withdrawal in {@code PENDING_APPROVAL}, both move it to {@code APPROVED}, and both write an
-     * outbox row — and then the second one to commit fails on the {@code @Version} column, taking
-     * its outbox row down with it. The guarantee comes from the row being written inside the same
-     * transaction as the state change; a publish that happened after the commit would already be
-     * gone by the time the conflict was discovered.
+     * <p><b>Two approvals arriving at once produce one event.</b> The approval path takes
+     * {@code SELECT … FOR UPDATE} on the withdrawal before it counts, so the second caller waits and
+     * sees a settled count rather than racing. Behind that, the {@code @Version} column is still the
+     * backstop for any other route to this method: both transactions would move the withdrawal to
+     * {@code APPROVED} and write an outbox row, and the second to commit would fail on the version
+     * check, taking its outbox row down with it. The guarantee comes from the row being written
+     * inside the same transaction as the state change; a publish that happened after the commit
+     * would already be gone by the time the conflict was discovered.
      *
      * <p><b>Approving twice in sequence is a {@code 409}, not a second event.</b> The state machine
      * has no {@code APPROVED → APPROVED} edge, so {@link Withdrawal#moveTo} refuses. Idempotency here
@@ -59,17 +65,20 @@ public class WithdrawalApprovalService {
      * the controller's decision to make, not this method's.
      *
      * @param withdrawalId which withdrawal
+     * @param approvals the evidence to publish with it. The signer re-verifies every entry against
+     *     its own trusted keys, so this list is a claim rather than a credential — an empty one is
+     *     valid and produces an event the signer will refuse.
      * @return the withdrawal, now approved, or empty if there is no such withdrawal
      * @throws IllegalStateTransitionException if it is not waiting for approval
      */
     @Transactional
-    public Optional<Withdrawal> approve(UUID withdrawalId) {
+    public Optional<Withdrawal> approve(UUID withdrawalId, List<WithdrawalApproved.Approval> approvals) {
         Optional<Withdrawal> found = withdrawals.findById(withdrawalId);
-        found.ifPresent(this::approveAndAnnounce);
+        found.ifPresent(withdrawal -> approveAndAnnounce(withdrawal, approvals));
         return found;
     }
 
-    private void approveAndAnnounce(Withdrawal withdrawal) {
+    private void approveAndAnnounce(Withdrawal withdrawal, List<WithdrawalApproved.Approval> approvals) {
         withdrawal.moveTo(WithdrawalStatus.APPROVED);
         outbox.append(
                 Topics.WITHDRAWALS,
@@ -79,12 +88,7 @@ public class WithdrawalApprovalService {
                         withdrawal.getId(),
                         withdrawal.getDestination(),
                         withdrawal.getAmount(),
-                        // Empty until M3. The signer's policy already refuses an event whose
-                        // approvals do not verify against its own trusted keys, so it will refuse
-                        // every event this milestone produces — which is the correct behaviour for a
-                        // system where nobody has actually approved anything yet, and is why M5 can
-                        // be built against this without weakening it.
-                        List.of()));
+                        approvals));
         // No save(). The withdrawal was loaded inside this transaction, so it is a managed entity and
         // Hibernate writes the UPDATE at commit. Calling save() would be a no-op that suggests
         // otherwise.
