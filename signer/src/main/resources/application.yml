@@ -23,8 +23,11 @@ spring:
       properties:
         enable.idempotence: true
 
-# The signer has no signing endpoint. Actuator still needs a port for health
-# checks, kept off 8080 so both services can run on the laptop at once.
+# The signer has no signing endpoint, and with no web starter on the classpath
+# it has no HTTP server at all. Actuator is still worth having for its health
+# indicators, which a container runtime can read from the JMX endpoint or from
+# a sidecar; the port below only takes effect if a web starter is ever added,
+# and is kept off 8080 so both services can run on one laptop.
 server:
   port: 8081
 
@@ -40,12 +43,44 @@ management:
 
 chain:
   rpc-url: http://localhost:8545
+  # Anvil. Signed into every transaction (EIP-155), so a transaction signed here
+  # cannot be replayed on a chain where the same address holds real money.
   chain-id: 31337
 
 signer:
   # Stand-in for a KMS or HSM. Read from the environment so it never lands in
-  # git; a real deployment would fetch it from a vault at startup and the key
+  # git; a real deployment would fetch it from a vault at startup, and the key
   # itself would never leave the HSM at all.
   master-key: ${SIGNER_MASTER_KEY:}
-  # Hot-wallet policy (M5): refuse anything above this in one transaction.
-  max-transaction-wei: "5000000000000000000" # 5 ETH
+
+  hot-wallet:
+    # The one address this service signs from. Authoritative: the imported key
+    # has to derive to it, so a key from the wrong environment fails at startup
+    # rather than quietly moving funds out of a wallet nobody reconciles.
+    address: ${SIGNER_HOT_WALLET_ADDRESS:}
+    # Only needed on the first boot of a fresh database. Once the key is sealed
+    # in wallet_keys, remove it from the environment: after that it is a copy of
+    # a secret with no reader.
+    import-private-key: ${SIGNER_HOT_WALLET_PRIVATE_KEY:}
+
+  policy:
+    # The hot-wallet cap. A hot wallet is online and automated by definition, so
+    # this number is what an attacker who owns everything upstream gets per
+    # transaction. Anything larger is a warm-wallet operation with a human in it.
+    max-transaction-wei: "5000000000000000000" # 5 ETH
+    # Four eyes from 1 ETH up; one approver below it. A rule expensive enough to
+    # be routinely worked around protects nothing, so the expensive rule is kept
+    # for the amounts that justify it.
+    second-approval-from-wei: "1000000000000000000" # 1 ETH
+    # Every approver this service will accept a signature from, by id and raw
+    # Ed25519 public key. Empty until M3 can produce signed approvals — which
+    # means the signer currently refuses every withdrawal custody-api can
+    # publish, and that is the correct behaviour rather than a gap.
+    trusted-approvers: []
+
+  broadcast:
+    # How long after signing a transaction may be considered lost. Longer than
+    # the listener's own broadcast takes, so the retry job and the listener
+    # never race to send the same bytes.
+    retry-after: 10s
+    retry-interval: 5s

@@ -228,6 +228,104 @@ why every consumer is idempotent:
 [ADR 0005](docs/adr/0005-the-outbox-relay-polls-and-sends-inside-its-transaction.md) and
 [ADR 0006](docs/adr/0006-consumers-are-idempotent-because-delivery-is-at-least-once.md).
 
+## The signer
+
+The only component that can move money, and the one built on the assumption that
+everything upstream of it has been compromised.
+
+```mermaid
+flowchart LR
+    K{{WithdrawalApproved}} --> P[SigningPolicy]
+    P -->|no| F[WithdrawalSigningFailed<br/>the hold goes back]
+    P -->|yes| N[reserve nonce<br/>FOR UPDATE]
+    N --> S[sign EIP-1559<br/>key unsealed for one call]
+    S --> L[(signing_log<br/>+ outbox row)]
+    L -.->|after commit| B[eth_sendRawTransaction]
+```
+
+Everything from the duplicate check to the outbox row is one database transaction.
+The broadcast is deliberately outside it.
+
+**The approvals in the event are evidence, not credentials.** Each one carries an
+approver id, a public key and a signature, and the signer uses the id to look up a
+key from *its own* configuration — never the key in the message, which would be
+verifying a forger's signature against the forger's own key. What gets verified is
+an [`ApprovalStatement`](common/src/main/java/com/farzam/events/ApprovalStatement.java)
+reconstructed from the event's own withdrawal id, destination and amount, so
+editing any of the three invalidates every signature over it. An attacker who owns
+`custody-api` completely can publish a withdrawal for ten thousand ETH to an
+address they control, and the signer refuses it, because forging an approval needs
+a private key `custody-api` has never held.
+
+| Refused when | Because |
+| --- | --- |
+| The destination is not a well-formed address | Nothing downstream should be guessing what was meant |
+| The amount is zero, negative, or over the hot-wallet cap | A hot wallet is automated, so its cap is what an attacker gets per transaction |
+| Fewer valid approvals than the amount needs | Two distinct approvers at or above 1 ETH, one below |
+| A signature does not verify, or the approver is not trusted | The point of the whole exercise |
+
+**Quorum counts approvers, not approvals.** Counting rows would let one approver
+satisfy a two-approver quorum by sending their valid signature twice, which is a
+copy-paste away and defeats four-eyes entirely.
+
+**A refusal is published, not thrown.** Letting it escape the listener would roll
+the transaction back, retry three times and dead-letter the message — leaving the
+withdrawal `APPROVED` in custody-api, the client's funds held indefinitely, and the
+explanation in a topic nobody watches. Saying no out loud is what releases the hold.
+
+### Keys
+
+```mermaid
+flowchart LR
+    MK[Master key<br/>env var, standing in for a KMS] -->|wraps| DK[Data key<br/>one per wallet]
+    DK -->|AES-256-GCM<br/>AAD = the address| PK[Encrypted private key<br/>in wallet_keys]
+```
+
+Envelope encryption, so rotating the master key means re-wrapping a handful of
+32-byte data keys rather than re-encrypting every secret in the system, and so the
+master key stays off the data path — which is what makes swapping the environment
+variable for a KMS a change to one class. GCM is authenticated, so a tampered
+ciphertext throws instead of yielding a plausible wrong key, which here would mean
+a valid signature from an address nobody controls and nothing in any log. The
+wallet address is the additional authenticated data, so copying an encrypted key
+onto another row — a one-line `UPDATE` for anyone with write access — produces
+something that will not decrypt.
+
+Keys are lent, not handed out: `WalletKeys.withPrivateKey` decrypts, passes the
+bytes to a lambda and zeroes them in a `finally`. The honest limit is that web3j
+holds the key as a `BigInteger` while signing, which cannot be wiped — so the array
+this code owns is cleared and the library's copy is not.
+[ADR 0007](docs/adr/0007-wallet-keys-are-envelope-encrypted-and-lent-not-handed-out.md)
+says what that does and does not buy.
+
+### Nonces, and why a retry never re-signs
+
+Two things are called a nonce and only one of them is here. The ECDSA signing
+nonce `k` is secret, lives inside a single signature, and leaks the private key if
+it ever repeats — RFC 6979 makes it deterministic and it belongs to the library.
+The *transaction* nonce is a public per-account counter, it lives in
+`chain_nonces`, and it is reserved with `SELECT … FOR UPDATE` inside the signing
+transaction so two concurrent withdrawals cannot take the same one.
+
+That counter is the last line of defence against a double payment: a nonce can be
+mined at most once, so even if every other guard failed, the chain would pay once.
+Which is also why **a slow transaction is resent, never re-signed** — re-signing
+takes a fresh nonce and produces a second valid transaction, and if the first was
+merely slow rather than lost, both get mined. `signing_log` keeps the raw bytes for
+exactly that reason, and `withdrawal_id` is its primary key so a withdrawal cannot
+be signed twice.
+
+The cost is a gap: a transaction signed and never sent leaves a nonce nothing will
+use, and nothing behind it can be mined. The retry job makes that rare. It is not
+theoretical — the first version of `BroadcastRetryTest` signed from the shared hot
+wallet without sending, and every other test in the module started timing out
+behind the gap.
+
+Why the commit happens before the broadcast, why "already known" and "nonce too
+low" have to be told apart with a receipt lookup, and what a production signer
+would do about a stuck transaction:
+[ADR 0008](docs/adr/0008-sign-and-commit-before-broadcasting-and-never-re-sign.md).
+
 ## Running it
 
 Requires JDK 25 and Docker.
@@ -275,15 +373,25 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 --topic custody.withdrawals.v1 --from-beginning
 ```
 
-Nothing consumes it yet — that is the signer, in M5. Approving the same withdrawal a
-second time returns `409`: the state machine has no `APPROVED → APPROVED` edge, so
-there is no second event either.
+The signer consumes it — and refuses it, which is correct. It re-verifies the
+approvals against its own trusted keys, and until M3 exists custody-api publishes
+an empty `approvals` list, so the answer is always no. Approving the same
+withdrawal a second time returns `409`: the state machine has no
+`APPROVED → APPROVED` edge, so there is no second event either.
+
+To see the signer say yes you need an approver it trusts, which for now means the
+integration tests — `SignerEndToEndTest` generates an Ed25519 key pair, configures
+it as trusted, funds a wallet on Anvil and drives the whole path through to a mined
+transaction.
 
 Tests use [Testcontainers](https://testcontainers.com/), so they start their own
-throwaway Postgres and do not need the Compose stack running. A real Postgres
-rather than H2, because the ledger depends on `FOR UPDATE SKIP LOCKED`, `jsonb`,
-partial indexes and `numeric(78,0)` — an H2 test would pass while production
-broke.
+throwaway Postgres, Kafka and Anvil and do not need the Compose stack running. A
+real Postgres rather than H2, because the ledger depends on
+`FOR UPDATE SKIP LOCKED`, `jsonb`, partial indexes and `numeric(78,0)` — an H2 test
+would pass while production broke. A real Anvil rather than a stub node, because
+what the signer's tests are asking is whether the bytes it produced are a
+transaction the EVM accepts, and a stub would have to reimplement the EVM to have
+an opinion.
 
 ## Quality gates
 
@@ -350,7 +458,7 @@ Useful invocations:
 | ✅ | **M1** Ledger | Double-entry posting, row locking, concurrency under 50 threads |
 | ✅ | **M2** Withdrawal API | API-first OpenAPI contract, idempotency keys, RFC 9457 errors |
 | ✅ | **M4** Outbox and Kafka | Transactional outbox, `SKIP LOCKED` relay, idempotent consumers, DLT |
-| ⬜ | **M5** Signer | Envelope encryption, nonce management, EIP-1559 signing and broadcast |
+| ✅ | **M5** Signer | Envelope encryption, nonce management, EIP-1559 signing and broadcast |
 | ⬜ | **M3** Approvals | Ed25519 four-eyes approval with amount-based quorum |
 | ⬜ | **M6** Confirmations | Receipt polling, settlement, reconciliation against the chain |
 
@@ -358,8 +466,18 @@ Useful invocations:
 
 This is a learning project, and the gaps are deliberate rather than overlooked:
 
-- Keys would live in an HSM or be split with MPC. Here a master key comes from
-  an environment variable standing in for a KMS.
+- Keys would live in an HSM or be split with MPC, and the private key would never
+  exist in the signing process at all. Here a master key comes from an environment
+  variable standing in for a KMS, which means a heap dump of the signer is a total
+  loss — the single largest gap in this project.
+- One hot wallet, no warm or cold tier, and no HD derivation. A real custodian
+  keeps most of the assets offline, moves them to the hot wallet in batches, and
+  derives a fresh deposit address per client from an extended public key.
+- The signer resends a stuck transaction but never reprices it. A transaction whose
+  fee is too low needs replacing at the *same* nonce with a fee about 10% higher;
+  automating that needs a view of how long is too long, which arrives with M6's
+  watcher. A nonce gap likewise has a standard manual remedy — a zero-value
+  transaction to yourself at the stuck nonce — that nothing here performs.
 - Finality would use Ethereum's `finalized` block tag, not a fixed 3
   confirmations — that number exists to keep a local demo fast.
 - No authentication or authorisation on the API yet, one chain, one asset.
@@ -367,9 +485,16 @@ This is a learning project, and the gaps are deliberate rather than overlooked:
   `docker-compose.yml`. Local development configuration, not deployable.
 - The outbox relay stops its batch on a failed send, so one permanently unsendable
   row halts it. A production relay would count attempts and park a row that has
-  failed enough times, and alert on the age of the oldest unpublished row.
-- `processed_events` grows for ever. It needs a job deleting rows older than the
-  topic's retention, beyond which no redelivery is possible.
+  failed enough times, and alert on the age of the oldest unpublished row. The
+  broadcast retry job has the same shape and wants the same alarm, on the age of
+  the oldest transaction with no `broadcast_at`.
+- Both services carry their own copy of the outbox writer and relay. The second
+  copy arrived with M5 and has not been extracted into a shared module yet —
+  [ADR 0008](docs/adr/0008-sign-and-commit-before-broadcasting-and-never-re-sign.md)
+  covers the signing half of that decision; the extraction is the obvious next
+  refactor and is deliberately not bundled into a milestone.
+- `processed_events` grows for ever, in both services. It needs a job deleting rows
+  older than the topic's retention, beyond which no redelivery is possible.
 
 ## Licence
 
