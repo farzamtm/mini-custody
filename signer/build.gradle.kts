@@ -37,6 +37,25 @@ dependencies {
     // EIP-1559 transaction. A bug in either is a lost key or a lost payment.
     implementation("org.web3j:crypto:6.0.0")
 
+    // web3j 6.0.0 resolves BouncyCastle 1.80, which has three advisories with
+    // released fixes — two CRITICAL — so the dependency gate rejects it, and
+    // rightly: this is the library doing the secp256k1 arithmetic. None of the
+    // three is reachable from this code (GOST-CTR, X.509 name constraints, and
+    // ASN.1 parsing; the signer does none of those), but "we do not call that
+    // method" is a claim that stops being true the first time somebody adds a
+    // certificate check, and the fix is a version number.
+    //
+    // A constraint rather than an explicit dependency: this module does not use
+    // BouncyCastle directly, so declaring it would assert a relationship that
+    // does not exist and would survive web3j dropping it. Delete this once web3j
+    // ships a release that resolves 1.85 or newer on its own — Trivy will not let
+    // it rot silently either way.
+    constraints {
+        implementation("org.bouncycastle:bcprov-jdk18on:1.86") {
+            because("CVE-2025-14813 and CVE-2026-8763 (CRITICAL) and CVE-2026-13506 (HIGH) in 1.80")
+        }
+    }
+
     // RestClient, for the JSON-RPC calls above. The library, not the starter:
     // spring-web has no servlet container in it, so this stays a service that
     // makes HTTP calls and does not answer them.
