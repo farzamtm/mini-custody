@@ -43,14 +43,6 @@ import org.springframework.transaction.annotation.Transactional;
  * refusal becomes a {@code WithdrawalSigningFailed} event in the same transaction, so custody-api
  * can put the money back. The signer saying no out loud is what makes the hold releasable.
  */
-/*
- * The suppression is class-wide rather than per line, because the justification is a property of
- * the whole class and is easier to review stated once: every value this class logs is a UUID or an
- * enum constant, neither of which can carry a newline and forge a log line. The single free-text
- * field it handles, the refusal reason, is built by SigningPolicy from string literals and numbers
- * and never from anything that arrived on the topic.
- */
-@SuppressFBWarnings(value = "CRLF_INJECTION_LOGS", justification = "See the note above the class.")
 @Component
 public class WithdrawalApprovedListener {
 
@@ -102,6 +94,9 @@ public class WithdrawalApprovedListener {
      */
     @KafkaListener(topics = Topics.WITHDRAWALS, groupId = CONSUMER)
     @Transactional
+    @SuppressFBWarnings(
+            value = "CRLF_INJECTION_LOGS",
+            justification = "A UUID, which Jackson has already parsed as one. It cannot carry a newline.")
     public void onWithdrawalApproved(String message) {
         EventEnvelope event = EventJson.read(message, EventEnvelope.class);
 
@@ -138,6 +133,10 @@ public class WithdrawalApprovedListener {
      * about the same withdrawal, which is what a replayed topic or a misconfigured custody-api
      * produces.
      */
+    @SuppressFBWarnings(
+            value = "CRLF_INJECTION_LOGS",
+            justification = "UUIDs, a long, and a transaction hash this service computed as hex from "
+                    + "keccak-256 of bytes it signed. None can carry a newline.")
     private void signAndQueue(WithdrawalApproved approved) {
         policy.check(approved);
 
@@ -177,6 +176,12 @@ public class WithdrawalApprovedListener {
     /**
      * Says no, in a way that reaches the client.
      */
+    @SuppressFBWarnings(
+            value = "CRLF_INJECTION_LOGS",
+            justification = "A UUID, and a reason SigningPolicy builds from string literals and numbers "
+                    + "of its own -- never from anything that arrived on the topic. Neither can "
+                    + "carry a newline. This is the one worth re-reading if the reason ever starts "
+                    + "quoting the event.")
     private void refuse(UUID withdrawalId, String reason) {
         LOG.info("refusing to sign withdrawal {}: {}", withdrawalId, reason);
         outbox.append(

@@ -208,6 +208,90 @@ class WithdrawalEventFlowIntegrationTest extends AbstractKafkaTest {
     }
 
     /**
+     * The signer's replay path, from the consuming end.
+     *
+     * <p>{@code theSameResultDeliveredTwiceChangesStateOnce} covers a redelivery under the same
+     * event id, which {@code processed_events} catches. This is the case it cannot: the signer,
+     * asked twice about a withdrawal it has already signed, republishes rather than re-signs — and
+     * the outbox mints a fresh event id per row, so the second copy arrives looking like a new
+     * event. {@code SignerEndToEndTest} proves the signer really does produce two.
+     *
+     * <p>The assertion that matters is the dead-letter topic. State and balances were already safe
+     * via the state machine and the ledger's unique index; what was not safe was the partition,
+     * which stalled for three retries, and the dead-letter topic, which collected events that were
+     * entirely expected.
+     */
+    @Test
+    void aRepublishedBroadcastUnderANewEventIdIsIgnoredRatherThanDeadLettered() {
+        approve();
+        var broadcast = new WithdrawalBroadcast(withdrawal.getId(), TX_HASH);
+
+        // Two different event ids, one logical result: what republishing looks like from in here.
+        publishResult(UUID.randomUUID(), EventType.WITHDRAWAL_BROADCAST, broadcast);
+        publishResult(UUID.randomUUID(), EventType.WITHDRAWAL_BROADCAST, broadcast);
+
+        await().atMost(SETTLES_WITHIN)
+                .untilAsserted(() -> assertThat(statusOf(withdrawal.getId())).isEqualTo(WithdrawalStatus.BROADCAST));
+
+        assertThat(drain(Topics.dlt(Topics.SIGNER_RESULTS), withdrawal.getId(), LISTEN))
+                .as("the second copy is expected, not poison")
+                .isEmpty();
+        assertThat(reload().getTxHash()).isEqualTo(TX_HASH);
+        assertThat(ledger.balanceOf(accountId)).isEqualTo(ONE_ETH.subtract(POINT_FOUR_ETH));
+    }
+
+    /** The same for a refusal, which the state machine rejected as {@code FAILED -> FAILED}. */
+    @Test
+    void aRepublishedRefusalUnderANewEventIdIsIgnoredRatherThanDeadLettered() {
+        approve();
+        var refusal = new WithdrawalSigningFailed(withdrawal.getId(), "quorum not met");
+
+        publishResult(UUID.randomUUID(), EventType.WITHDRAWAL_SIGNING_FAILED, refusal);
+        publishResult(UUID.randomUUID(), EventType.WITHDRAWAL_SIGNING_FAILED, refusal);
+
+        await().atMost(SETTLES_WITHIN)
+                .untilAsserted(() -> assertThat(statusOf(withdrawal.getId())).isEqualTo(WithdrawalStatus.FAILED));
+
+        assertThat(drain(Topics.dlt(Topics.SIGNER_RESULTS), withdrawal.getId(), LISTEN)).isEmpty();
+        assertThat(ledger.balanceOf(accountId)).as("released once").isEqualTo(ONE_ETH);
+        assertThat(transactions.countByKindAndReferenceId(JournalKind.WITHDRAWAL_RELEASE, withdrawal.getId()))
+                .isEqualTo(1);
+    }
+
+    /**
+     * Tolerating a republish must not tolerate the forgery M7 defends against.
+     *
+     * <p>The cheap version of the fix above — treat any event whose target state the withdrawal is
+     * already in as a no-op — would have swallowed this. A withdrawal that has been failed, meeting a
+     * broadcast for a transaction it does not carry, is the tail of the ADR 0012 attack: the forged
+     * refusal released the hold, and the signer's genuine broadcast arrives afterwards. Its rejection
+     * is the only trace of that sequence, so it has to keep failing loudly.
+     *
+     * <p>Arranged by failing the withdrawal legitimately first, because the forged refusal itself no
+     * longer gets through — which is the point of M7 and is asserted separately above.
+     */
+    @Test
+    void aBroadcastForAWithdrawalAlreadyFailedStillDeadLetters() {
+        approve();
+        publishResult(
+                UUID.randomUUID(),
+                EventType.WITHDRAWAL_SIGNING_FAILED,
+                new WithdrawalSigningFailed(withdrawal.getId(), "quorum not met"));
+        await().atMost(SETTLES_WITHIN)
+                .untilAsserted(() -> assertThat(statusOf(withdrawal.getId())).isEqualTo(WithdrawalStatus.FAILED));
+
+        publishResult(
+                UUID.randomUUID(),
+                EventType.WITHDRAWAL_BROADCAST,
+                new WithdrawalBroadcast(withdrawal.getId(), TX_HASH));
+
+        assertThat(drain(Topics.dlt(Topics.SIGNER_RESULTS), withdrawal.getId(), LISTEN))
+                .as("a broadcast this withdrawal never carried is still an error")
+                .hasSize(1);
+        assertThat(statusOf(withdrawal.getId())).isEqualTo(WithdrawalStatus.FAILED);
+    }
+
+    /**
      * The M7 criterion, and the reason any of this exists.
      *
      * <p>Before the signature check, this exact message released the hold: a hand-built refusal with

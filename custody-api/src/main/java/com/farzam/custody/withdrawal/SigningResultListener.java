@@ -143,9 +143,33 @@ public class SigningResultListener {
      * {@code PENDING_OUT} where they have been since the request.
      * {@link com.farzam.custody.confirmation.ConfirmationWatcher} settles them against
      * {@code EXTERNAL} once the receipt has three confirmations behind it.
+     *
+     * <p><b>A result naming a hash this withdrawal already carries is a no-op, not an error.</b>
+     * {@code processed_events} cannot catch this one: the signer's documented replay path
+     * republishes rather than re-signs, and the outbox mints a fresh {@code eventId} per row, so the
+     * second copy of a result arrives looking like a new event. Without this the state machine
+     * refused it — {@code BROADCAST -> BROADCAST} is not a legal move, and neither is
+     * {@code CONFIRMED -> BROADCAST} once the watcher has been past — and the message was retried
+     * three times and then dead-lettered. Nothing was corrupted, but the partition stalled for the
+     * retries and the dead-letter topic filled with events that were entirely expected, which is how
+     * an alerting signal becomes noise nobody reads.
+     *
+     * <p>The guard is deliberately narrow: <em>this</em> hash, already recorded. A result carrying a
+     * different hash still goes to the state machine and still fails if the move is illegal. That
+     * matters beyond tidiness — a withdrawal in {@code FAILED} meeting a broadcast it does not
+     * already carry is the shape of the M7 attack (ADR 0012), and its rejection is the only trace
+     * that survives. Tolerating the state rather than the hash would have deleted it.
      */
+    @SuppressFBWarnings(
+            value = "CRLF_INJECTION_LOGS",
+            justification = "A UUID, read back from this service's own withdrawals table. It cannot "
+                    + "carry a newline. The transaction hash in the payload is compared, never logged.")
     private Withdrawal recordBroadcast(WithdrawalBroadcast broadcast) {
         Withdrawal withdrawal = require(broadcast.withdrawalId());
+        if (broadcast.txHash().equals(withdrawal.getTxHash())) {
+            LOG.debug("withdrawal {} already carries this transaction; republished result ignored", withdrawal.getId());
+            return withdrawal;
+        }
         withdrawal.broadcastAs(broadcast.txHash());
         return withdrawal;
     }
@@ -159,9 +183,24 @@ public class SigningResultListener {
      * redelivery that slipped past the first guard, or by M6 releasing the same hold for a different
      * reason. Neither is redundant: the first protects the state machine, the second protects the
      * balance.
+     *
+     * <p>A third guard now sits in front of both, for the same reason {@link #recordBroadcast} has
+     * one: a republished refusal arrives under a new {@code eventId}, so the duplicate check misses
+     * it and {@code FAILED -> FAILED} is not a legal move. The withdrawal is already where this event
+     * would put it and the hold has already gone back, so there is nothing to do and nothing to
+     * report. The ledger's unique index made this harmless already; what it did not do was stop the
+     * message being retried and dead-lettered.
      */
+    @SuppressFBWarnings(
+            value = "CRLF_INJECTION_LOGS",
+            justification = "A UUID, read back from this service's own withdrawals table. The one "
+                    + "free-text field on this event, the signer's reason, is stored and never logged.")
     private Withdrawal releaseAfterFailure(WithdrawalSigningFailed failure) {
         Withdrawal withdrawal = require(failure.withdrawalId());
+        if (withdrawal.getStatus() == WithdrawalStatus.FAILED) {
+            LOG.debug("withdrawal {} has already failed; republished refusal ignored", withdrawal.getId());
+            return withdrawal;
+        }
         withdrawal.endWith(WithdrawalStatus.FAILED, failure.reason());
         ledger.post(
                 JournalKind.WITHDRAWAL_RELEASE,
