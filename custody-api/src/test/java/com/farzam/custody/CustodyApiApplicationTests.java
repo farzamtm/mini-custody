@@ -11,6 +11,7 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.ApplicationContext;
 
 /**
  * M0 acceptance test.
@@ -30,10 +31,36 @@ class CustodyApiApplicationTests extends AbstractPostgresTest {
     @Autowired
     private DataSource dataSource;
 
+    @Autowired
+    private ApplicationContext context;
+
     @Test
     void contextLoads() {
         // Intentionally empty: the assertion is that startup did not throw.
         assertThat(dataSource).isNotNull();
+    }
+
+    /**
+     * No background thread talks to the outside world in an ordinary test context.
+     *
+     * <p>A guard rather than a feature. {@code chain.rpc-url} defaults to
+     * {@code http://localhost:8545}, which on a developer's machine is whatever
+     * {@code docker compose up} left running — so a scheduled watcher polls a real Ethereum node
+     * from every test in the module, and the results depend on whether the stack happens to be up.
+     * {@code test/resources/application.properties} turns the timer off for exactly that reason,
+     * and this asserts it, because deleting a properties file is a silent way to undo it: nothing
+     * would fail, the suite would simply go back to reaching outside the repository.
+     *
+     * <p>The tests whose subject <em>is</em> the timer turn it back on per class, and
+     * {@code ConfirmationSchedulingTest} would fail loudly if that stopped working.
+     */
+    @Test
+    void theConfirmationWatchersTimerIsNotRunningByDefault() {
+        // The bean carries the @Scheduled method and is @ConditionalOnProperty, so its absence is
+        // the timer's absence — there is nothing else to assert and nothing subtler to get wrong.
+        assertThat(context.containsBean("confirmationScheduling"))
+                .as("the chain watcher's timer should be off unless a test asks for it")
+                .isFalse();
     }
 
     @Test
