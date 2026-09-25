@@ -15,13 +15,19 @@ it and settles a double-entry ledger.
 
 Five ideas drive the design, and each is worth a paragraph:
 
-**The signer is isolated and trusts nobody.** It has no HTTP endpoint for
-signing — look at `signer/build.gradle.kts` and note the absence of a web
-starter. It only reacts to Kafka events, and before signing it re-verifies every
-approval signature against its *own* list of trusted public keys, not the list
-in the event. An attacker who completely owns `custody-api` can mark a
-withdrawal approved in the database, but cannot forge approver signatures, so
-the signer refuses. Compromising the API alone does not move funds.
+**The signer is isolated and trusts nobody, and neither service trusts the other.**
+The signer has no HTTP endpoint for signing — look at `signer/build.gradle.kts` and
+note the absence of a web starter. It only reacts to Kafka events, and before signing
+it re-verifies every approval signature against its *own* list of trusted public keys,
+not the list in the event. An attacker who completely owns `custody-api` can mark a
+withdrawal approved in the database, but cannot forge approver signatures, so the
+signer refuses. Compromising the API alone does not move funds. The same distrust runs
+back the other way: the signer signs every result it publishes, and `custody-api`
+refuses one it cannot verify — because "the signer refused, give the money back"
+releases a ledger hold, and believing an unauthenticated one hands a client their
+balance back while the transaction is being broadcast. That direction was missing until
+M7, and [ADR 0012](docs/adr/0012-signer-results-are-authenticated-the-way-approvals-are.md)
+is the write-up of the hole and the fix.
 
 **Two people have to agree, and the agreement is evidence rather than a flag.** An
 approver signs a statement of exactly what they are endorsing — this withdrawal, to
@@ -71,14 +77,14 @@ flowchart LR
     K -->|WithdrawalApproved| S[signer]
     S --> PG2[(Postgres<br/>signer)]
     S -->|signed tx| A[Anvil<br/>local Ethereum]
-    S -->|SigningResult| K
-    K -->|SigningResult| API
+    S -->|SigningResult<br/>Ed25519-signed| K
+    K -->|SigningResult<br/>verified or refused| API
     API -->|poll receipts| A
 ```
 
 | Module | Owns |
 | --- | --- |
-| `common` | The Kafka event contract, and the Ed25519 verification both services share. Deliberately has no Spring dependency. |
+| `common` | The Kafka event contract, and the Ed25519 signing and verification both services share. Deliberately has no Spring dependency. |
 | `custody-api` | Clients, the double-entry ledger, withdrawals, approvals, confirmations, the REST API. |
 | `signer` | Wallet keys. The only component that can sign. |
 
@@ -322,10 +328,22 @@ Each of those has a test: approving publishes exactly one message, two relays
 draining the same backlog publish nothing twice, the same result delivered twice
 changes state and balances once, and a malformed message ends up on `.DLT`.
 
+**Results are authenticated; approvals on the way out are not, and the asymmetry is
+deliberate.** The signer's relay attaches an Ed25519 signature over the exact bytes it
+publishes, in an `x-event-signature` header, and `custody-api` verifies it against a
+public key from its own configuration before the message is parsed or deduplicated.
+`custody-api`'s relay does not sign, because the signer already treats everything on
+`custody.withdrawals.v1` as hostile and re-checks the approvals inside it — a signature
+there would prove the message came from `custody-api`, which is not a fact the signer
+has any use for. Tests cover an unsigned refusal, an impostor's signature, and a genuine
+signature replayed onto a different result; each is dead-lettered with the hold intact.
+
 Why polling rather than Debezium, why the send happens inside the transaction, and
 why every consumer is idempotent:
 [ADR 0005](docs/adr/0005-the-outbox-relay-polls-and-sends-inside-its-transaction.md) and
 [ADR 0006](docs/adr/0006-consumers-are-idempotent-because-delivery-is-at-least-once.md).
+Why the results topic is signed and the withdrawals topic is not:
+[ADR 0012](docs/adr/0012-signer-results-are-authenticated-the-way-approvals-are.md).
 
 ## The signer
 
@@ -396,6 +414,17 @@ holds the key as a `BigInteger` while signing, which cannot be wiped — so the 
 this code owns is cleared and the library's copy is not.
 [ADR 0007](docs/adr/0007-wallet-keys-are-envelope-encrypted-and-lent-not-handed-out.md)
 says what that does and does not buy.
+
+There is a third key, and it is deliberately not part of any of the above.
+`signer.results.signing-key` is an Ed25519 seed the signer uses to authenticate the
+results it publishes, and it cannot move funds — it only proves a message came from
+here. Keeping it separate from the wallet key means it rotates on its own schedule and
+a copy of it leaking is an authenticity problem rather than a custody one; keeping it a
+different algorithm from the wallet's secp256k1 means the two cannot be confused in
+configuration. Unlike the policy list, an absent value is a startup failure rather than
+a fail-closed default: a signer that cannot sign is safe, but one that signs
+transactions and cannot authenticate its own reports broadcasts on chain and then has
+every report rejected, stranding the withdrawal with the client's funds held.
 
 ### Nonces, and why a retry never re-signs
 
@@ -580,12 +609,46 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
 ```
 
 The signer consumes it — and still refuses it, unless you have also put Alice's public
-key in *its* configuration:
+key in *its* configuration. It also needs a key pair of its own, so that `custody-api`
+can tell a real result from a forged one:
 
 ```bash
+# The signer's results key. Ed25519 again, and nothing to do with the wallet: this one
+# cannot spend anything, it only proves a message came from the signer. The seed is the
+# last 32 bytes of the DER private key, as the public key is of the DER public key.
+openssl genpkey -algorithm ed25519 -out /tmp/signer-results.pem
+RESULTS_SEED=$(openssl pkey -in /tmp/signer-results.pem -outform DER | tail -c 32 | base64)
+RESULTS_PUBKEY=$(openssl pkey -in /tmp/signer-results.pem -pubout -outform DER | tail -c 32 | base64)
+
 SIGNER_POLICY_TRUSTED_APPROVERS_0_ID=$APPROVER \
 SIGNER_POLICY_TRUSTED_APPROVERS_0_PUBLIC_KEY=$PUBKEY \
+SIGNER_RESULTS_SIGNING_KEY=$RESULTS_SEED \
   ./gradlew :signer:bootRun
+```
+
+`custody-api` needs the matching public key, so restart it with:
+
+```bash
+CUSTODY_SIGNER_RESULTS_PUBLIC_KEY=$RESULTS_PUBKEY ./gradlew :custody-api:bootRun
+```
+
+Leave that one out and the withdrawal is signed and broadcast but never progresses past
+`APPROVED`: every result is refused and lands on `signer.results.v1.DLT`. That is the
+fail-closed direction and it is loud, which is the point —
+[ADR 0012](docs/adr/0012-signer-results-are-authenticated-the-way-approvals-are.md) has
+the argument for why the alternative default is much worse. You can watch the refusal
+happen by publishing a fabricated one yourself:
+
+```bash
+# A hand-built refusal for a withdrawal that is waiting to be signed. Before M7 this
+# released the hold and credited the client back while the signer broadcast the
+# transaction anyway. Now it goes straight to the dead-letter topic.
+printf '{"aggregateId":"%s","eventId":"%s","eventType":"withdrawal.signing-failed.v1","occurredAt":"%s","payload":{"reason":"give it back","withdrawalId":"%s"}}' \
+  "$WITHDRAWAL" "$(uuidgen | tr 'A-Z' 'a-z')" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$WITHDRAWAL" \
+  | docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh \
+      --bootstrap-server localhost:9092 --topic signer.results.v1
+
+curl -s localhost:8080/v1/accounts/$ACCOUNT   # still 600000000000000000 — nothing came back
 ```
 
 That second step is not friction to be smoothed away, it is the design. The signer
@@ -693,7 +756,7 @@ Useful invocations:
 
 ## Milestones
 
-All seven have landed.
+All eight have landed.
 
 | | Milestone | What it demonstrates |
 | --- | --- | --- |
@@ -704,6 +767,7 @@ All seven have landed.
 | ✅ | **M4** Outbox and Kafka | Transactional outbox, `SKIP LOCKED` relay, idempotent consumers, DLT |
 | ✅ | **M5** Signer | Envelope encryption, nonce management, EIP-1559 signing and broadcast |
 | ✅ | **M6** Confirmations | Receipt polling, settlement, reconciliation against the chain |
+| ✅ | **M7** Signed results | The results topic authenticated, closing a forged-refusal double-spend |
 
 **They were not built in that order, and the detour is the interesting part.** M4 and
 M5 came before M3, so the signer existed for a while with nothing able to produce an
@@ -758,7 +822,11 @@ This is a learning project, and the gaps are deliberate rather than overlooked:
   copy arrived with M5 and has not been extracted into a shared module yet —
   [ADR 0008](docs/adr/0008-sign-and-commit-before-broadcasting-and-never-re-sign.md)
   covers the signing half of that decision; the extraction is the obvious next
-  refactor and is deliberately not bundled into a milestone.
+  refactor and is deliberately not bundled into a milestone. M7 made the two copies
+  genuinely different for the first time rather than merely separate: the signer's
+  relay signs what it publishes and custody-api's does not. That is the right call —
+  custody-api publishes to a topic the signer already treats as hostile — but it is one
+  more thing a future extraction has to reconcile, and it reprices the deferral.
 - `processed_events` grows for ever, in both services. It needs a job deleting rows
   older than the topic's retention, beyond which no redelivery is possible.
 

@@ -1,5 +1,7 @@
 package com.farzam.custody.support;
 
+import com.farzam.events.EventSignature;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -10,6 +12,7 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -35,18 +38,64 @@ public abstract class AbstractKafkaTest extends AbstractPostgresTest {
     @SuppressWarnings("resource") // stopped by Ryuk at JVM exit, by design
     private static final KafkaContainer KAFKA = new KafkaContainer("apache/kafka:3.8.0");
 
+    /**
+     * The signer identity these tests speak as.
+     *
+     * <p>Shared across the module so that {@link #signed} and the configured public key cannot
+     * disagree. A test that wants to be somebody else generates its own {@link TestSigner} — which
+     * is the point of {@code anImpostorsResultIsRefused}.
+     */
+    protected static final TestSigner SIGNER = TestSigner.generate();
+
     static {
         KAFKA.start();
     }
 
     /**
-     * Points the application at the container's randomly-assigned broker port.
+     * Points the application at the container's randomly-assigned broker port, and tells it whose
+     * signer results to believe.
      *
      * @param registry Spring's test property registry
      */
     @DynamicPropertySource
     static void kafkaProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.kafka.bootstrap-servers", KAFKA::getBootstrapServers);
+        registry.add("custody.signer-results.public-key", SIGNER::publicKeyBase64);
+    }
+
+    /**
+     * Builds a record carrying a valid signature, as the real signer's relay would.
+     *
+     * <p>Tests go through this rather than {@code kafka.send(topic, key, value)} because since M7
+     * the plain three-argument send produces a message custody-api will refuse — which is the
+     * intended behaviour, and would otherwise look like a broken test.
+     *
+     * @param topic where to send it
+     * @param key the message key, normally a withdrawal id
+     * @param value the record value
+     * @return the record, signed, ready for {@code kafka.send}
+     */
+    protected static ProducerRecord<String, String> signed(String topic, String key, String value) {
+        return signedBy(SIGNER, topic, key, value);
+    }
+
+    /**
+     * The same, as somebody else.
+     *
+     * @param signer whose key to sign with
+     * @param topic where to send it
+     * @param key the message key
+     * @param value the record value
+     * @return the record, signed by that key
+     */
+    protected static ProducerRecord<String, String> signedBy(
+            TestSigner signer,
+            String topic,
+            String key,
+            String value) {
+        var record = new ProducerRecord<String, String>(topic, key, value);
+        record.headers().add(EventSignature.HEADER, signer.sign(value).getBytes(StandardCharsets.UTF_8));
+        return record;
     }
 
     /**

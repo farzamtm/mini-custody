@@ -9,20 +9,24 @@ import com.farzam.custody.ledger.JournalTransactionRepository;
 import com.farzam.custody.ledger.LedgerService;
 import com.farzam.custody.ledger.SystemAccounts;
 import com.farzam.custody.support.AbstractKafkaTest;
+import com.farzam.custody.support.TestSigner;
 import com.farzam.custody.whitelist.WhitelistService;
 import com.farzam.events.EventEnvelope;
 import com.farzam.events.EventJson;
+import com.farzam.events.EventSignature;
 import com.farzam.events.EventType;
 import com.farzam.events.Topics;
 import com.farzam.events.WithdrawalApproved;
 import com.farzam.events.WithdrawalBroadcast;
 import com.farzam.events.WithdrawalSigningFailed;
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -203,11 +207,108 @@ class WithdrawalEventFlowIntegrationTest extends AbstractKafkaTest {
                 .isEqualTo(1);
     }
 
+    /**
+     * The M7 criterion, and the reason any of this exists.
+     *
+     * <p>Before the signature check, this exact message released the hold: a hand-built refusal with
+     * a fresh event id, published straight to the topic by something that is not the signer. The
+     * withdrawal is in APPROVED, so the signer is at this moment signing and broadcasting it — and
+     * crediting the client back while that happens is a double-spend, with the ETH gone and the books
+     * saying it never left.
+     *
+     * <p>The assertion that matters is the balance. The status is asserted too, but a test that only
+     * checked the status would have passed against a version that released the money and then failed
+     * the state transition.
+     */
+    @Test
+    void anUnsignedRefusalIsRefusedAndTheMoneyStaysHeld() {
+        approve();
+        BigInteger heldBefore = ledger.balanceOf(SystemAccounts.PENDING_OUT);
+
+        kafka.send(
+                Topics.SIGNER_RESULTS,
+                withdrawal.getId().toString(),
+                result(
+                        UUID.randomUUID(),
+                        EventType.WITHDRAWAL_SIGNING_FAILED,
+                        new WithdrawalSigningFailed(withdrawal.getId(), "give it back")));
+
+        List<ConsumerRecord<String, String>> deadLettered = drain(
+                Topics.dlt(Topics.SIGNER_RESULTS),
+                withdrawal.getId(),
+                LISTEN);
+
+        assertThat(deadLettered).as("set aside rather than applied").hasSize(1);
+        assertThat(statusOf(withdrawal.getId())).isEqualTo(WithdrawalStatus.APPROVED);
+        assertThat(ledger.balanceOf(accountId)).as("no money came back").isEqualTo(ONE_ETH.subtract(POINT_FOUR_ETH));
+        assertThat(ledger.balanceOf(SystemAccounts.PENDING_OUT)).as("the hold stands").isEqualTo(heldBefore);
+        assertThat(transactions.countByKindAndReferenceId(JournalKind.WITHDRAWAL_RELEASE, withdrawal.getId()))
+                .as("nothing was released")
+                .isZero();
+    }
+
+    /**
+     * A signature that is real, over these exact bytes, by a key custody-api was not deployed with.
+     *
+     * <p>The distinction from the unsigned case is worth its own test: it is the difference between
+     * "did anybody sign this" and "did the right party sign this", and an implementation that
+     * verified the header was well-formed without checking whose key it was would pass the first and
+     * fail here.
+     */
+    @Test
+    void anImpostorsResultIsRefused() {
+        approve();
+
+        kafka.send(
+                signedBy(
+                        TestSigner.generate(),
+                        Topics.SIGNER_RESULTS,
+                        withdrawal.getId().toString(),
+                        result(
+                                UUID.randomUUID(),
+                                EventType.WITHDRAWAL_SIGNING_FAILED,
+                                new WithdrawalSigningFailed(withdrawal.getId(), "give it back"))));
+
+        assertThat(drain(Topics.dlt(Topics.SIGNER_RESULTS), withdrawal.getId(), LISTEN)).hasSize(1);
+        assertThat(statusOf(withdrawal.getId())).isEqualTo(WithdrawalStatus.APPROVED);
+        assertThat(ledger.balanceOf(accountId)).isEqualTo(ONE_ETH.subtract(POINT_FOUR_ETH));
+    }
+
+    /**
+     * The signature covers the message, so a genuine one cannot be lifted onto a different result.
+     *
+     * <p>This is the attack left open by a scheme that signed only, say, the withdrawal id: take the
+     * signature from the broadcast result the signer really did publish, and reuse it on a refusal.
+     */
+    @Test
+    void aGenuineSignatureCannotBeReplayedOntoADifferentResult() {
+        approve();
+        String broadcast = result(
+                UUID.randomUUID(),
+                EventType.WITHDRAWAL_BROADCAST,
+                new WithdrawalBroadcast(withdrawal.getId(), TX_HASH));
+        String refusal = result(
+                UUID.randomUUID(),
+                EventType.WITHDRAWAL_SIGNING_FAILED,
+                new WithdrawalSigningFailed(withdrawal.getId(), "give it back"));
+
+        // The header from the broadcast, the body of the refusal.
+        var forged = new ProducerRecord<>(Topics.SIGNER_RESULTS, withdrawal.getId().toString(), refusal);
+        forged.headers().add(EventSignature.HEADER, SIGNER.sign(broadcast).getBytes(StandardCharsets.UTF_8));
+        kafka.send(forged);
+
+        assertThat(drain(Topics.dlt(Topics.SIGNER_RESULTS), withdrawal.getId(), LISTEN)).hasSize(1);
+        assertThat(statusOf(withdrawal.getId())).isEqualTo(WithdrawalStatus.APPROVED);
+        assertThat(ledger.balanceOf(accountId)).isEqualTo(ONE_ETH.subtract(POINT_FOUR_ETH));
+    }
+
     @Test
     void aMalformedMessageEndsUpOnTheDeadLetterTopic() {
         UUID key = UUID.randomUUID();
 
-        kafka.send(Topics.SIGNER_RESULTS, key.toString(), "{ this is not an event");
+        // Signed, so that what this test exercises is still the parse failure rather than the
+        // signature check that now runs before it.
+        kafka.send(signed(Topics.SIGNER_RESULTS, key.toString(), "{ this is not an event"));
 
         List<ConsumerRecord<String, String>> deadLettered = drain(Topics.dlt(Topics.SIGNER_RESULTS), key, LISTEN);
 
@@ -225,8 +326,11 @@ class WithdrawalEventFlowIntegrationTest extends AbstractKafkaTest {
     }
 
     private void publishResult(UUID eventId, EventType type, Object payload) {
-        EventEnvelope envelope = EventEnvelope.of(eventId, type, Instant.now(), withdrawal.getId(), payload);
-        kafka.send(Topics.SIGNER_RESULTS, withdrawal.getId().toString(), EventJson.write(envelope));
+        kafka.send(signed(Topics.SIGNER_RESULTS, withdrawal.getId().toString(), result(eventId, type, payload)));
+    }
+
+    private String result(UUID eventId, EventType type, Object payload) {
+        return EventJson.write(EventEnvelope.of(eventId, type, Instant.now(), withdrawal.getId(), payload));
     }
 
     private WithdrawalStatus statusOf(UUID id) {

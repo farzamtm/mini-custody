@@ -98,6 +98,20 @@ approvals:
   # what happens when the two are set to different numbers.
   second-approval-from-wei: "1000000000000000000" # 1 ETH
 
+custody:
+  signer-results:
+    # The signer's Ed25519 public key, raw 32 bytes base64. Every message on
+    # signer.results.v1 is checked against it before anything is applied.
+    #
+    # Empty here, and empty means this service applies no signer result at all.
+    # That is the correct default rather than a gap, and it is the same argument
+    # as `signer.policy.trusted-approvers` pointing the other way: a result that
+    # says the signer refused releases a client's hold, so accepting one nobody
+    # can vouch for hands money back for a withdrawal that is being broadcast at
+    # that moment. See ADR 0012. The README shows it being set from the
+    # environment for a local run.
+    public-key: ${CUSTODY_SIGNER_RESULTS_PUBLIC_KEY:}
+
 # Bound to ChainProperties. custody-api only reads the chain — it holds no key and
 # cannot send anything; the signer does that.
 chain:

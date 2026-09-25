@@ -100,6 +100,12 @@ class KafkaConfig {
      * seconds. Registering it as non-retryable sends it straight to the dead-letter topic instead of
      * spending three attempts proving that JSON does not fix itself.
      *
+     * <p><b>Neither is an unauthentic one.</b> {@link UnauthenticEventException} means the message
+     * did not come from the signer, and a signature that does not verify now will not verify later.
+     * Retrying it would be worse than pointless: the one way to produce these messages in volume is
+     * deliberately, and three attempts each would let whoever is producing them cost this service
+     * four times the work and block the partition for legitimate results behind them.
+     *
      * @param template used to publish the failed message to {@code <topic>.DLT}
      * @return the container-wide error handler Spring Boot wires into every listener
      */
@@ -125,7 +131,7 @@ class KafkaConfig {
         backOff.setMaxAttempts(3);
 
         var handler = new DefaultErrorHandler(recoverer, backOff);
-        handler.addNotRetryableExceptions(EventFormatException.class);
+        handler.addNotRetryableExceptions(EventFormatException.class, UnauthenticEventException.class);
         return handler;
     }
 }

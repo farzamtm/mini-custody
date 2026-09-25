@@ -3,15 +3,17 @@ package com.farzam.crypto;
 import java.math.BigInteger;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
+import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.security.interfaces.EdECPublicKey;
 import java.security.spec.EdECPoint;
+import java.security.spec.EdECPrivateKeySpec;
 import java.security.spec.EdECPublicKeySpec;
 import java.security.spec.NamedParameterSpec;
 
 /**
- * Ed25519 verification, against raw 32-byte public keys.
+ * Ed25519 signing and verification, against raw 32-byte keys.
  *
  * <p>The JDK has had Ed25519 since 15 and it needs no third-party provider, which matters on a
  * service that already carries one crypto library: the fewer implementations of signature
@@ -25,6 +27,14 @@ import java.security.spec.NamedParameterSpec;
  * refuses, leaving the withdrawal stuck with both services convinced they are right. The duplication
  * that {@code docs/adr/0009} accepts for the outbox is Spring infrastructure, which cannot come here
  * at all; this is fifty lines of pure JDK with no such obstacle.
+ *
+ * <p><b>Why there is a {@link #sign} here and not only a {@link #verify}.</b> Until M7 nothing in
+ * either service held an Ed25519 private key — approvers signed elsewhere and both services only
+ * ever checked. M7 gives the signer a key of its own so it can authenticate the results it reports
+ * back, and custody-api the matching public key so it can refuse a result the signer did not send.
+ * See {@link com.farzam.events.EventSignature} and ADR 0012. Putting the signing half next to the
+ * verifying half is the same argument as above: one implementation of the packing, one of the
+ * algorithm name, and a round trip that is a testable property rather than two hopeful assertions.
  *
  * <p><b>Why Ed25519 for approvals and secp256k1 for transactions.</b> They are answering different
  * questions. The transaction signature has to be one Ethereum will accept, so the curve is not a
@@ -48,6 +58,15 @@ public final class Ed25519 {
 
     /** A raw Ed25519 public key: one compressed curve point. */
     private static final int PUBLIC_KEY_BYTES = 32;
+
+    /**
+     * A raw Ed25519 private key: the seed the rest of the key is derived from.
+     *
+     * <p>The same width as a public key and not the same kind of thing. An Ed25519 private key is
+     * this seed hashed into a scalar and a prefix, and the seed is what every wire format and every
+     * key-generation tool actually hands over, so it is what {@link #privateKeyFrom} takes.
+     */
+    private static final int PRIVATE_KEY_BYTES = 32;
 
     /** (r, s), 32 bytes each. */
     private static final int SIGNATURE_BYTES = 64;
@@ -121,6 +140,61 @@ public final class Ed25519 {
             littleEndian[PUBLIC_KEY_BYTES - 1] |= (byte) SIGN_BIT;
         }
         return littleEndian;
+    }
+
+    /**
+     * Reads a raw private key.
+     *
+     * <p>Throws rather than returning an empty optional, and unlike {@link #publicKeyFrom} the
+     * failure is not something to diagnose later at the first withdrawal. A service holding a
+     * malformed signing key cannot sign anything at all, so the only useful moment to find out is
+     * startup, and the only useful behaviour is to refuse to start.
+     *
+     * @param seed the 32 bytes the key is derived from
+     * @return a key {@link #sign} can use
+     * @throws IllegalArgumentException if it is not 32 bytes, or the provider rejects it outright
+     */
+    public static PrivateKey privateKeyFrom(byte[] seed) {
+        if (seed.length != PRIVATE_KEY_BYTES) {
+            throw new IllegalArgumentException(
+                    "an Ed25519 private key is " + PRIVATE_KEY_BYTES + " bytes, got " + seed.length);
+        }
+
+        try {
+            // The spec copies the array, but it is cloned here anyway: the caller's buffer is
+            // something it may well want to zero out afterwards, and a defensive copy is cheaper
+            // than depending on a provider's internals staying the way they are today.
+            return KeyFactory.getInstance(ALGORITHM)
+                    .generatePrivate(new EdECPrivateKeySpec(NamedParameterSpec.ED25519, seed.clone()));
+        } catch (GeneralSecurityException rejected) {
+            throw new IllegalArgumentException("not a valid Ed25519 private key", rejected);
+        }
+    }
+
+    /**
+     * Signs a message.
+     *
+     * <p>Throws rather than returning a sentinel, which is the opposite of {@link #verify} and for
+     * the opposite reason. A verifier has two legitimate answers and the caller does the same thing
+     * for every kind of "no". A signer has one: either these are the bytes, or the key is broken and
+     * nothing downstream can proceed. Returning null or an empty array would let a caller publish an
+     * unsigned message and discover it at the consumer, which is exactly the failure this whole
+     * mechanism exists to make impossible.
+     *
+     * @param key the signer's private key
+     * @param message the canonical bytes to sign
+     * @return the 64 signature bytes
+     * @throws IllegalStateException if the key cannot sign — a misconfiguration, not a bad input
+     */
+    public static byte[] sign(PrivateKey key, byte[] message) {
+        try {
+            Signature signer = Signature.getInstance(ALGORITHM);
+            signer.initSign(key);
+            signer.update(message);
+            return signer.sign();
+        } catch (GeneralSecurityException broken) {
+            throw new IllegalStateException("could not sign with this Ed25519 key", broken);
+        }
     }
 
     /**
