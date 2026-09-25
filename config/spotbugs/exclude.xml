@@ -12,8 +12,18 @@
     <!-- Spring's constructor injection hands beans their collaborators and
          those collaborators are singletons owned by the container. SpotBugs
          reads "field assigned from a constructor parameter" as a mutable-state
-         leak, which would flag essentially every Spring bean in the project. -->
+         leak, which would flag essentially every Spring bean in the project.
+
+         Scoped to the two Spring modules, because that reason is only true of
+         them. `common` has no Spring in it at all, and it is the module where
+         this detector has teeth: it holds the raw key and signature bytes that
+         Ed25519 verification and the event contract are built on, and both
+         services break together if a copy there turns into an alias. The code
+         defends itself by hand today — `raw.clone()`, fresh arrays out of
+         `canonicalBytes` — which is precisely the discipline a detector should
+         be keeping once nobody remembers to. -->
     <Match>
+        <Source name="~.*[\\/](custody-api|signer)[\\/].*"/>
         <Or>
             <Bug pattern="EI_EXPOSE_REP"/>
             <Bug pattern="EI_EXPOSE_REP2"/>
