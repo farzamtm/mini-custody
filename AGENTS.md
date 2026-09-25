@@ -161,7 +161,13 @@ would pass while production broke. Test method names are full sentences
 `@WithoutKafka`.
 
 **A decision gets an ADR.** `docs/adr/`, numbered, stating what was rejected and
-why — not only what was chosen. Link it from the README section it belongs to.
+why — not only what was chosen. Link it from the `docs/design.md` section it belongs to.
+
+**The README is the short version and stays that way.** It answers what this is, how it
+fits together, how a withdrawal flows through it, and how to run it. Reasoning — the
+argument for a decision and what the alternative costs — goes in `docs/design.md`, which
+the README links to. A change that adds three paragraphs of justification to the README
+is a change that belongs next door.
 
 ## Layout
 
@@ -171,7 +177,7 @@ why — not only what was chosen. Link it from the README section it belongs to.
 | `custody-api` | Clients, the double-entry ledger, withdrawals, approvals, the REST API. |
 | `signer` | Wallet keys. The only component that can sign. Has no web starter, and must not gain one. |
 
-Milestone status lives in the README's Milestones table. M0 to M6 have all landed;
+Milestone status lives in the README's Milestones table. M0 to M7 have all landed;
 anything from here is new work, and whatever defines it gets a row in that table
 and is ticked by the pull request that finishes it.
 
