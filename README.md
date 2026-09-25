@@ -11,9 +11,59 @@ it and settles a double-entry ledger.
 > [What a production system would do differently](#what-a-production-system-would-do-differently)
 > for the gaps that are deliberate.
 
+## Start here
+
+This is a long document, because most of it is reasoning rather than description.
+Three shorter ways in, depending on what you came for:
+
+**The design argument in five minutes** — [Why it looks like this](#why-it-looks-like-this),
+then the [architecture diagram](#architecture). Six ideas, one paragraph each.
+
+**The most interesting thing that happened** — a review of this repository found an
+exploitable double-spend in its own design. `custody-api` believed anything that
+appeared on the signer's results topic, and one of the messages it believed was "the
+signer refused, give the money back" — which releases a ledger hold. So anyone able to
+produce to that topic could have a client credited back while the real signer went on
+signing and broadcasting the same withdrawal: the ETH leaves the hot wallet and the
+books say it never did. The uncomfortable part is that an integration test already in
+the repository *was* the exploit, written months earlier as a happy-path assertion; the
+only difference between it and an attacker was who held the producer.
+[ADR 0012](docs/adr/0012-signer-results-are-authenticated-the-way-approvals-are.md) is
+the write-up — the exploit, the fix, and four alternatives rejected with reasons.
+
+**Whether any of it actually works** — [Running it](#running-it) is a copy-pasteable
+walk-through from deposit to a mined transaction, including a fabricated refusal you can
+publish yourself to watch the check above reject it. [Quality gates](#quality-gates) is
+what CI enforces on every pull request.
+
+If you read one class, read
+[`SigningPolicy`](signer/src/main/java/com/farzam/signer/signing/SigningPolicy.java):
+it is where the claim "compromising the API does not move funds" is either true or not.
+
+<details>
+<summary><b>Full contents</b></summary>
+
+- [Why it looks like this](#why-it-looks-like-this) — the six ideas driving the design
+- [Architecture](#architecture) — the three modules and what crosses between them
+- [The ledger](#the-ledger) — double-entry, append-only, and the three properties with tests
+- [The API](#the-api) — contract-first, idempotency keys, RFC 9457 errors
+- [Approvals](#approvals) — four eyes, and why the signature covers a rebuilt statement
+- [Events](#events) — transactional outbox, at-least-once delivery, signed results
+- [The signer](#the-signer) — the component that assumes everything upstream is compromised
+  - [Keys](#keys) — envelope encryption, and the three keys that are not interchangeable
+  - [Nonces, and why a retry never re-signs](#nonces-and-why-a-retry-never-re-signs)
+- [Confirmations and settlement](#confirmations-and-settlement) — why broadcast is not settled
+  - [Reconciliation](#reconciliation) — asking the chain whether the ledger is still true
+- [Running it](#running-it) — the full walk-through, and how the tests are built
+- [Quality gates](#quality-gates) — what CI rejects, and why each gate is configured that way
+- [Milestones](#milestones) — what each step demonstrates, and why they were built out of order
+- [What a production system would do differently](#what-a-production-system-would-do-differently) — the deliberate gaps
+
+</details>
+
 ## Why it looks like this
 
-Five ideas drive the design, and each is worth a paragraph:
+Six ideas drive the design, and each is worth a paragraph:
 
 **The signer is isolated and trusts nobody, and neither service trusts the other.**
 The signer has no HTTP endpoint for signing — look at `signer/build.gradle.kts` and
@@ -725,9 +775,10 @@ build is something you find before you push, not after.
 | Format | [Spotless](https://github.com/diffplug/spotless) (Eclipse JDT) | Anything `./gradlew spotlessApply` would change. |
 | Style | [Checkstyle](https://checkstyle.org/) | Naming, unused imports, swallowed exceptions, `System.out`, methods over 12 branches — and `float`/`double` anywhere, because wei is an exact integer. |
 | Bugs and SAST | [SpotBugs](https://spotbugs.github.io/) + [find-sec-bugs](https://find-sec-bugs.github.io/) | Null dereferences, resource leaks, SQL injection, weak crypto, predictable RNG. |
-| Coverage | [JaCoCo](https://www.jacoco.org/) | Line coverage below 92%. A floor that ratchets up per milestone, not a target. |
+| Coverage | [JaCoCo](https://www.jacoco.org/) | Line coverage below 94%, per module. A floor that ratchets up per milestone, not a target. |
 | Secrets | [Gitleaks](https://github.com/gitleaks/gitleaks) | Credentials anywhere in history, with extra rules for Ethereum private keys and the signer master key. |
 | Dependencies | CycloneDX SBOM → [Trivy](https://trivy.dev/) | A new HIGH or CRITICAL CVE that has a released fix. |
+| Dataflow SAST | [CodeQL](https://codeql.github.com/) | Whole-program dataflow findings. Runs on every pull request, but does not block one — see below. |
 
 Three of those deserve a word on why they are configured the way they are.
 
@@ -755,12 +806,23 @@ it the formatter reproduces this codebase's hand-written style byte for byte.
 Comment formatting is off entirely — code is fully canonical, prose is left to
 the author.
 
-**Security scanning is Trivy and find-sec-bugs rather than CodeQL**, because
-this repository is private and CodeQL needs GitHub Advanced Security. Trivy
-reads a CycloneDX SBOM that the build generates, since Gradle resolves versions
-at build time and leaves no lockfile a scanner could read on its own. Unfixable
-CVEs do not block a merge — a pull request cannot action an advisory with no
-patch — but they still show up in the CI log and in Dependabot.
+**There are three security scanners and only two of them can block a merge.**
+find-sec-bugs rides along with SpotBugs in the `Quality` job and is the blocking
+SAST layer. Trivy reads a CycloneDX SBOM the build generates, because Gradle
+resolves versions at build time and leaves no lockfile a scanner could read on
+its own; unfixable CVEs do not block a merge, since a pull request cannot action
+an advisory with no patch, but they still show up in the CI log and in Dependabot.
+
+CodeQL is the third, and it is deliberately not a required check. It does
+whole-program dataflow, which a bytecode pattern matcher cannot — it can follow a
+request parameter through three services into a SQL string — so it is worth
+running. But its Java extractor tracks new language versions on its own schedule
+and this project compiles on JDK 25, which is ahead of most. A day when the
+extractor cannot parse a JDK 25 feature should surface as one failing check to
+investigate, not as a blocked merge on every open pull request. It lives in
+`.github/workflows/codeql.yml` with that reasoning written down, and the note
+there says to promote it into the required set once it has been green for a few
+weeks.
 
 Useful invocations:
 
@@ -849,9 +911,9 @@ This is a learning project, and the gaps are deliberate rather than overlooked:
   `RpcException` a far longer budget than a malformed event deserves.
 - Both services carry their own copy of the outbox writer and relay. The second
   copy arrived with M5 and has not been extracted into a shared module yet —
-  [ADR 0008](docs/adr/0008-sign-and-commit-before-broadcasting-and-never-re-sign.md)
-  covers the signing half of that decision; the extraction is the obvious next
-  refactor and is deliberately not bundled into a milestone. M7 made the two copies
+  [ADR 0009](docs/adr/0009-the-outbox-is-duplicated-rather-than-extracted-for-now.md)
+  is the decision and what would make it worth revisiting; the extraction is the
+  obvious next refactor and is deliberately not bundled into a milestone. M7 made the two copies
   genuinely different for the first time rather than merely separate: the signer's
   relay signs what it publishes and custody-api's does not. That is the right call —
   custody-api publishes to a topic the signer already treats as hostile — but it is one
