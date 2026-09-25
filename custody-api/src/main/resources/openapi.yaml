@@ -273,6 +273,11 @@ paths:
         because being able to ask the question by hand is what makes the property
         demonstrable.
 
+        Approved-but-unsigned withdrawals are also checked, and those cost nothing
+        — there is no transaction to ask the chain about, which is exactly what is
+        wrong with them. A withdrawal stuck there has the client's funds held with
+        nothing retrying on its own.
+
         `hotWalletBalanceWei` is information, not a check. It cannot be reconciled
         in this system: deposits are fabricated by `POST /dev/deposits` rather than
         observed on chain, because nothing here watches for incoming transfers. A
@@ -738,7 +743,7 @@ components:
 
     Reconciliation:
       type: object
-      required: [checkedAt, confirmedChecked, inFlightChecked, agrees, discrepancies]
+      required: [checkedAt, confirmedChecked, inFlightChecked, approvedChecked, agrees, discrepancies]
       properties:
         checkedAt:
           type: string
@@ -749,6 +754,12 @@ components:
         inFlightChecked:
           type: integer
           description: How many broadcast withdrawals were looked at.
+        approvedChecked:
+          type: integer
+          description: |
+            How many approved-but-not-yet-broadcast withdrawals were looked at.
+            These cost no JSON-RPC call — there is no transaction to ask about
+            yet, which is the whole problem with them.
         agrees:
           type: boolean
           description: |
@@ -778,12 +789,16 @@ components:
           description: |
             Worst first. The first two mean the ledger has recorded an outflow the
             chain does not support; the third means a settlement's two halves came
-            apart; the last is operational — a transaction that has not been mined
-            for a long time, which the signer resends but never reprices.
+            apart. The last two are stalls, where the money is held and nothing is
+            moving: a withdrawal nobody ever signed, and a transaction that has not
+            been mined for a long time. The second of those at least has the signer
+            resending it — though never repricing — while the first has nothing
+            retrying it at all.
           enum:
             - SETTLED_WITHOUT_A_RECEIPT
             - SETTLED_A_REVERTED_TRANSACTION
             - SETTLED_WITHOUT_A_POSTING
+            - APPROVED_BUT_NEVER_SIGNED
             - BROADCAST_BUT_NOT_MINED
         detail:
           type: string

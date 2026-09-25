@@ -15,9 +15,10 @@ public record Discrepancy(UUID withdrawalId, Kind kind, String detail) {
      * The disagreements worth looking for.
      *
      * <p>Ordered by how bad they are, which is also the order they are worth reading in: the first
-     * two mean money has been recorded as gone that the chain does not say has gone, the third means
-     * the two halves of a settlement came apart, and the last is an operational nag rather than a
-     * discrepancy at all.
+     * two mean money has been recorded as gone that the chain does not say has gone, and the third
+     * means the two halves of a settlement came apart. The last two are stalls rather than
+     * disagreements — the ledger and the chain do not contradict each other, the withdrawal has
+     * simply stopped moving with the client's funds held.
      *
      * <p>What is deliberately <em>not</em> here is a check that the hot wallet's on-chain balance
      * matches the ledger. It cannot match in this system and saying so every minute would train
@@ -56,6 +57,26 @@ public record Discrepancy(UUID withdrawalId, Kind kind, String detail) {
          * exactly the sort of "quick fix in psql" that leaves a ledger quietly wrong.
          */
         SETTLED_WITHOUT_A_POSTING,
+
+        /**
+         * Approved a long time ago and never broadcast.
+         *
+         * <p>The client's funds are held in {@code PENDING_OUT} from the moment they ask, so a
+         * withdrawal that stops here is money locked out of a balance with nothing working on it.
+         * Unlike {@link #BROADCAST_BUT_NOT_MINED}, nothing retries this on its own.
+         *
+         * <p>Two causes, and the report cannot tell them apart from here. Either the outbox never
+         * published the {@code WithdrawalApproved} — the relay halts its batch on a failed send —
+         * or the signer took it and gave up. The signer's listener makes two JSON-RPC calls inside
+         * its transaction, and {@code DefaultErrorHandler} retries three times over about a second
+         * and a half before dead-lettering; nothing consumes {@code withdrawals.DLT}. So a node
+         * that is unreachable for a second at the wrong moment strands the withdrawal permanently.
+         *
+         * <p>This check exists because neither cause emits anything. Before it, the honest answer
+         * to "is anything stuck?" was a report that said everything agreed while a client's money
+         * sat locked up indefinitely.
+         */
+        APPROVED_BUT_NEVER_SIGNED,
 
         /**
          * Broadcast a long time ago and still not mined.

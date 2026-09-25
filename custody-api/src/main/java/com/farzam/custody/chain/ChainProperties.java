@@ -28,9 +28,14 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *     size does.
  * @param rpcTimeout how long to wait for the node. Short, because the watcher holds a database
  *     transaction open while it asks.
- * @param stuckAfter how long a withdrawal may sit in {@code BROADCAST} with no receipt before
- *     reconciliation mentions it. Not a failure — the signer's retry job resends, and a busy chain
- *     is slow — but an unmined transaction that is hours old is something an operator should see.
+ * @param stuckAfter how long a withdrawal may sit still before reconciliation mentions it. It
+ *     governs two stalls. In {@code BROADCAST} with no receipt it is not a failure — the signer's
+ *     retry job resends, and a busy chain is slow — but an unmined transaction that is hours old is
+ *     something an operator should see. In {@code APPROVED} it is more serious, because nothing
+ *     retries at all: the outbox may never have published the event, or the signer may have
+ *     dead-lettered it, and either way the client's funds stay held. One budget for both rather than
+ *     two, even though signing normally takes about a second and mining takes as long as it takes.
+ *     Generous in the approved direction is the right way to be wrong for a report a person reads.
  */
 @ConfigurationProperties("chain")
 public record ChainProperties(URI rpcUrl, long chainId, int confirmations, String hotWalletAddress,

@@ -3,6 +3,7 @@ package com.farzam.custody.confirmation;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.farzam.custody.ledger.DepositService;
+import com.farzam.custody.ledger.LedgerService;
 import com.farzam.custody.support.AbstractChainTest;
 import com.farzam.custody.support.TestChain;
 import com.farzam.custody.support.WithoutKafka;
@@ -34,7 +35,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  * emitted an event.
  *
  * <p>{@code chain.stuck-after} is zero here, so a withdrawal counts as stuck the moment it is
- * broadcast. The alternative is a test that sleeps for ten minutes.
+ * approved or broadcast. The alternative is a test that sleeps for ten minutes. The other side of
+ * that threshold — that a withdrawal which has only just moved is <em>not</em> a finding — needs a
+ * non-zero budget and lives in {@link ReconciliationQuietWindowTest}.
  */
 @SpringBootTest
 @WithoutKafka
@@ -66,6 +69,9 @@ class ReconciliationIntegrationTest extends AbstractChainTest {
 
     @Autowired
     private DepositService deposits;
+
+    @Autowired
+    private LedgerService ledger;
 
     @Autowired
     private TransactionTemplate transactions;
@@ -188,6 +194,50 @@ class ReconciliationIntegrationTest extends AbstractChainTest {
     }
 
     /**
+     * Approved, and it never left.
+     *
+     * <p>The gap this check closes. Both ways of reaching it are ordinary operational failures with
+     * no retry of last resort: the outbox relay halts its batch on a failed send, and the signer's
+     * listener makes live JSON-RPC calls inside its transaction, gets three attempts over about a
+     * second and a half, and dead-letters to a topic nothing consumes. So an Ethereum node that is
+     * briefly unreachable at the wrong moment strands the withdrawal for good.
+     *
+     * <p>Neither of those emits anything, which is why reconciliation has to be the thing that
+     * notices. Before this, the report said everything agreed — and it was telling the truth, which
+     * is the worst version of being wrong.
+     */
+    @Test
+    void aWithdrawalApprovedAndNeverSignedIsReported() {
+        Withdrawal withdrawal = approved();
+
+        ReconciliationReport report = reconciler.reconcile();
+
+        assertThat(report.approvedChecked()).as("and it actually looked").isPositive();
+        assertThat(report.agrees()).isFalse();
+        assertThat(findingsFor(report, withdrawal)).extracting(Discrepancy::kind)
+                .containsExactly(Discrepancy.Kind.APPROVED_BUT_NEVER_SIGNED);
+    }
+
+    /**
+     * The money is still held while it is stranded, which is what makes it worth reporting.
+     *
+     * <p>Asserted separately from the finding because the two could come apart: a report that named
+     * the withdrawal while the funds had quietly gone back would be describing a different and worse
+     * problem.
+     */
+    @Test
+    void aStrandedWithdrawalStillHasTheClientsFundsHeld() {
+        Withdrawal withdrawal = approved();
+
+        reconciler.reconcile();
+
+        assertThat(withdrawalRepository.findById(withdrawal.getId()).orElseThrow().getStatus())
+                .isEqualTo(WithdrawalStatus.APPROVED);
+        assertThat(ledger.balanceOf(accountId)).as("the hold is still against the client's balance")
+                .isEqualTo(TEN_ETH.subtract(POINT_FOUR_ETH));
+    }
+
+    /**
      * A transaction that is mined but not yet deep enough is not a finding.
      *
      * <p>It is the system working slowly, which is what it is supposed to do. A reconciliation job
@@ -232,15 +282,25 @@ class ReconciliationIntegrationTest extends AbstractChainTest {
     }
 
     private Withdrawal broadcast(String txHash) {
-        Withdrawal requested = withdrawals
-                .request(new WithdrawalCommand(accountId, DESTINATION, POINT_FOUR_ETH, UUID.randomUUID().toString()));
-        // No approvals: nothing in this file is about who signed off. What an approved withdrawal
-        // with genuine signatures on it looks like is ApprovalEventFlowIntegrationTest.
-        approvals.approve(requested.getId(), List.of());
+        Withdrawal requested = approved();
         return transactions.execute(status -> {
             Withdrawal withdrawal = withdrawalRepository.findById(requested.getId()).orElseThrow();
             withdrawal.broadcastAs(txHash);
             return withdrawal;
         });
+    }
+
+    /**
+     * A withdrawal that has been approved and is waiting for the signer.
+     *
+     * <p>Where every withdrawal in this file passes through, and where the stranded ones stop.
+     */
+    private Withdrawal approved() {
+        Withdrawal requested = withdrawals
+                .request(new WithdrawalCommand(accountId, DESTINATION, POINT_FOUR_ETH, UUID.randomUUID().toString()));
+        // No approvals: nothing in this file is about who signed off. What an approved withdrawal
+        // with genuine signatures on it looks like is ApprovalEventFlowIntegrationTest.
+        approvals.approve(requested.getId(), List.of());
+        return withdrawalRepository.findById(requested.getId()).orElseThrow();
     }
 }

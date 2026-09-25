@@ -41,6 +41,7 @@ class ReconciliationController implements ReconciliationApi {
                         report.checkedAt().atOffset(ZoneOffset.UTC),
                         report.confirmedChecked(),
                         report.inFlightChecked(),
+                        report.approvedChecked(),
                         report.agrees(),
                         report.discrepancies().stream().map(ReconciliationController::describe).toList())
                         .hotWalletBalanceWei(report.hotWalletBalanceWei().map(BigInteger::toString).orElse(null)));

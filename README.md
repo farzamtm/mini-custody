@@ -509,11 +509,23 @@ quietly stops existing. `GET /v1/reconciliation` goes back and asks.
 | `SETTLED_WITHOUT_A_RECEIPT` | The ledger recorded an outflow the chain no longer supports — a reorg deeper than three blocks |
 | `SETTLED_A_REVERTED_TRANSACTION` | The chain says the transaction failed, and the ledger settled it anyway |
 | `SETTLED_WITHOUT_A_POSTING` | The status and the journal came apart, which the code cannot do — so somebody did it in SQL |
+| `APPROVED_BUT_NEVER_SIGNED` | Approved a long time ago and never broadcast. Nothing retries this one at all |
 | `BROADCAST_BUT_NOT_MINED` | On the wire a long time and still not mined. The signer resends; it never reprices |
 
 It asks the chain rather than the receipt table, because comparing a stored receipt
 against a stored settlement is comparing the service to itself — and a service that
 has settled something that never happened is perfectly consistent about it.
+
+**The last two are stalls, not disagreements, and the first of them is the one with
+nobody behind it.** A withdrawal that stops in `APPROVED` has the client's funds held
+and two possible causes, neither of which emits anything: the outbox relay halts its
+batch on a failed send, or the signer took the event and gave up. The signer's listener
+makes live JSON-RPC calls inside its transaction and gets three attempts over about a
+second and a half before dead-lettering to a topic nothing consumes — so a node that is
+briefly unreachable at the wrong moment strands the withdrawal for good. A broadcast
+transaction at least has the signer resending it. Both share `chain.stuck-after`, which
+is generous for the approved case on purpose: this is a report a person reads, and a
+second threshold is a second thing to get wrong.
 
 **It reports and never repairs.** Every finding has more than one possible cause, and
 the right remedy depends on which: a settlement with no receipt behind it might want a
@@ -675,7 +687,12 @@ curl -s localhost:8080/v1/accounts/$ACCOUNT   # still 0.6: the hold became an ou
                                               # it did not come back
 
 curl -s localhost:8080/v1/reconciliation | jq
-# {"agrees": true, "confirmedChecked": 1, "inFlightChecked": 0, "discrepancies": []}
+# {"agrees": true, "confirmedChecked": 1, "inFlightChecked": 0, "approvedChecked": 0,
+#  "discrepancies": []}
+#
+# The three counts are why `agrees` can be trusted: a run that checked nothing also
+# agrees. `approvedChecked` is the bucket that catches a withdrawal the signer never
+# got to — funds held, and nothing retrying.
 ```
 
 Note what settlement did *not* do to the client's balance. The 0.4 ETH left
@@ -817,7 +834,19 @@ This is a learning project, and the gaps are deliberate rather than overlooked:
   row halts it. A production relay would count attempts and park a row that has
   failed enough times, and alert on the age of the oldest unpublished row. The
   broadcast retry job has the same shape and wants the same alarm, on the age of
-  the oldest transaction with no `broadcast_at`.
+  the oldest transaction with no `broadcast_at`. Reconciliation now *reports* the
+  consequence — `APPROVED_BUT_NEVER_SIGNED` after `chain.stuck-after` — so a
+  withdrawal stranded this way is visible rather than silent, which is the bargain
+  M6 struck for a stuck broadcast. Acting on it is still a person's job, and the
+  relay still has no attempt counter.
+- Nothing consumes either dead-letter topic. A message that fails its retries on
+  `signer.results.v1` or `custody.withdrawals.v1` lands somewhere nobody reads. That
+  matters most on the signer's side, where the listener makes live JSON-RPC calls
+  inside its transaction and gets three attempts over about a second and a half — so
+  an Ethereum node that is briefly unreachable at the wrong moment dead-letters the
+  approval and strands the withdrawal for good. Reconciliation makes it visible; a
+  production system would redrive the topic, and would give a transient
+  `RpcException` a far longer budget than a malformed event deserves.
 - Both services carry their own copy of the outbox writer and relay. The second
   copy arrived with M5 and has not been extracted into a shared module yet —
   [ADR 0008](docs/adr/0008-sign-and-commit-before-broadcasting-and-never-re-sign.md)
