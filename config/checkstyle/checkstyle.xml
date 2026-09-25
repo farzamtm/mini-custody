@@ -25,12 +25,23 @@
     <module name="NewlineAtEndOfFile"/>
 
     <module name="TreeWalker">
-        <!-- `// CHECKSTYLE:OFF` / `:ON` around a genuinely unavoidable
-             violation. Rare by design, and visible in review. -->
-        <module name="SuppressionCommentFilter">
-            <property name="offCommentFormat" value="CHECKSTYLE:OFF"/>
-            <property name="onCommentFormat" value="CHECKSTYLE:ON"/>
-        </module>
+        <!-- There is deliberately no SuppressionCommentFilter here.
+
+             It was configured for `// CHECKSTYLE:OFF` / `:ON` around a
+             genuinely unavoidable violation, on the grounds that it would be
+             rare and visible in review. No file ever used one, and the safeguard
+             was thinner than it looked: Checkstyle prints nothing when a comment
+             suppresses a violation, so a `CHECKSTYLE:OFF` block produces a green
+             `maxWarnings=0` run with no record anywhere in the build output that
+             a rule was switched off. The rules it could silence include the ban
+             on `float` and `double`, which this project treats as a correctness
+             rule about money rather than a style preference — and "the gate
+             passed" and "the gate ran" should not be able to come apart there.
+
+             If an escape hatch is ever genuinely needed, add a
+             SuppressionXpathFilter backed by a checked-in suppressions.xml, so
+             that every suppression sits in one file a reviewer can read on its
+             own rather than scattered through the sources. -->
 
         <!-- ==== Naming ==================================================== -->
         <module name="PackageName">
