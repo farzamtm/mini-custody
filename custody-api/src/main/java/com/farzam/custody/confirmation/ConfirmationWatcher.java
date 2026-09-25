@@ -45,13 +45,6 @@ import org.springframework.transaction.annotation.Transactional;
  * against a chain that produces a block every twelve is not the thing under load here.
  */
 @Component
-@SuppressFBWarnings(
-        value = "CRLF_INJECTION_LOGS",
-        justification = "Every value logged in this class is a UUID, a long, or a transaction hash "
-                + "read back from this service's own database, where it was written from a signer "
-                + "event. None of them can carry a newline, so none of them can forge a log line. "
-                + "Declared on the type because the logging is spread across the private methods "
-                + "the public one delegates to.")
 public class ConfirmationWatcher {
 
     private static final Logger LOG = LoggerFactory.getLogger(ConfirmationWatcher.class);
@@ -119,6 +112,10 @@ public class ConfirmationWatcher {
     /**
      * @return true if this withdrawal reached a terminal state in this pass
      */
+    @SuppressFBWarnings(
+            value = "CRLF_INJECTION_LOGS",
+            justification = "A UUID, a long and a transaction hash read back from this service's own "
+                    + "database. None can carry a newline.")
     private boolean settleIfReady(Withdrawal withdrawal, long head) {
         Optional<TransactionReceipt> found = chain.receiptOf(withdrawal.getTxHash());
 
@@ -159,6 +156,10 @@ public class ConfirmationWatcher {
      * for a receipt disappearing is that the signer's transaction was replaced by somebody else's at
      * the same nonce.
      */
+    @SuppressFBWarnings(
+            value = "CRLF_INJECTION_LOGS",
+            justification = "A UUID and a transaction hash read back from this service's own database, "
+                    + "where it was written from a signer event. Neither can carry a newline.")
     private void forgetAnyReceiptTheChainHasDropped(Withdrawal withdrawal) {
         if (receipts.find(withdrawal.getId()).isPresent()) {
             LOG.warn(
@@ -178,6 +179,10 @@ public class ConfirmationWatcher {
      * {@code WITHDRAWAL_SETTLE}, and the ledger's unique index means it books once however many
      * times a watcher is asked to.
      */
+    @SuppressFBWarnings(
+            value = "CRLF_INJECTION_LOGS",
+            justification = "A UUID, a long and a transaction hash from this service's own database. "
+                    + "None can carry a newline.")
     private void settle(Withdrawal withdrawal, TransactionReceipt receipt, long confirmations) {
         withdrawal.moveTo(WithdrawalStatus.CONFIRMED);
         ledger.post(
@@ -203,6 +208,10 @@ public class ConfirmationWatcher {
      * assumed away. What it must not do is settle: the value did not move, so booking
      * {@code PENDING_OUT → EXTERNAL} would record an outflow that never happened.
      */
+    @SuppressFBWarnings(
+            value = "CRLF_INJECTION_LOGS",
+            justification = "A UUID and a transaction hash from this service's own database. Neither "
+                    + "can carry a newline.")
     private void releaseAfterRevert(Withdrawal withdrawal, TransactionReceipt receipt) {
         withdrawal.endWith(WithdrawalStatus.FAILED, "the transaction reverted on chain");
         ledger.post(
