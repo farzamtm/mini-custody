@@ -281,7 +281,9 @@ class WithdrawalApiIntegrationTest extends AbstractPostgresTest {
 
     @Test
     void theExternalAccountIsNegativeAndBelongsToNobody() {
-        // The reconciliation invariant M6 will check: −EXTERNAL is what the hot wallet should hold.
+        // −EXTERNAL is what the hot wallet should hold on chain. Reconciliation reports that
+        // balance and deliberately does not compare it, because deposits here are fabricated
+        // rather than observed — see AccountType.EXTERNAL.
         assertThat(ledger.balanceOf(SystemAccounts.EXTERNAL)).isNegative();
 
         MvcTestResult external = mvc.get().uri("/v1/accounts/{id}", SystemAccounts.EXTERNAL).exchange();

@@ -114,7 +114,8 @@ public class SigningResultListener {
      *
      * <p>Nothing is posted to the ledger. Broadcast is not settled: the transaction is in the
      * mempool and can still be dropped, replaced or reverted, so the funds stay held in
-     * {@code PENDING_OUT} where they have been since the request. M6's watcher settles them against
+     * {@code PENDING_OUT} where they have been since the request.
+     * {@link com.farzam.custody.confirmation.ConfirmationWatcher} settles them against
      * {@code EXTERNAL} once the receipt has three confirmations behind it.
      */
     private Withdrawal recordBroadcast(WithdrawalBroadcast broadcast) {

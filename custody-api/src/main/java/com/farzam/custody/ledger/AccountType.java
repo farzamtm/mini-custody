@@ -20,8 +20,14 @@ public enum AccountType {
     /**
      * The outside world. A deposit of 1 ETH is EXTERNAL −1 / CLIENT +1: the money came from
      * somewhere, and in double-entry bookkeeping "somewhere" has to be an account. So this one is
-     * expected to run negative, and its negation is the amount the hot wallet should hold on
-     * chain — the invariant the reconciliation job (M6) checks.
+     * expected to run negative, and its negation is the amount the hot wallet should hold on chain.
+     *
+     * <p><b>Should</b>, and the reconciliation job deliberately does not assert it. Deposits
+     * here are fabricated by {@code POST /dev/deposits} rather than observed on chain, because
+     * nothing in this project watches for incoming transfers — so the two numbers have no reason to
+     * agree, and a check that failed on every run would train everybody to ignore the report.
+     * {@link com.farzam.custody.confirmation.Reconciler} reports the on-chain balance beside its
+     * findings and leaves the comparison to whoever adds a deposit watcher.
      */
     EXTERNAL;
 

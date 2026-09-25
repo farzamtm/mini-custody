@@ -112,8 +112,11 @@ public class EthereumRpc {
      * never be mined and no amount of retrying will change that. The error message is identical. The
      * receipt is what tells them apart.
      *
-     * <p>M6 will need this properly, with the block number and the status, to count confirmations
-     * and settle the ledger. Here it is only asked whether the transaction exists at all.
+     * <p>A boolean is the whole of what this service needs. custody-api reads the same receipt
+     * properly — block number, status, gas — to count confirmations and settle the ledger, and it
+     * does so through a client of its own rather than this one. See ADR 0011 for why the two are
+     * not shared: they have different call sets and, more to the point, different failure policies.
+     * This one treats "already known" as success, and nothing on the settlement side should.
      *
      * @param txHash the transaction to look for
      * @return whether the chain knows it

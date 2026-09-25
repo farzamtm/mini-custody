@@ -66,9 +66,8 @@ public class WithdrawalService {
      * Looks a withdrawal up.
      *
      * <p>Returns an {@link Optional} rather than throwing, and leaves turning absence into a
-     * {@code 404} to the controller. Whether a missing row is an error depends on who is asking —
-     * the confirmation watcher in M6 will want to skip one, not fail — and that is not a decision
-     * this method has the context to make.
+     * {@code 404} to the controller. Whether a missing row is an error depends on who is asking,
+     * and that is not a decision this method has the context to make.
      *
      * @param id the withdrawal id
      * @return the withdrawal, if it exists

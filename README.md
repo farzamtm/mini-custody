@@ -13,7 +13,7 @@ it and settles a double-entry ledger.
 
 ## Why it looks like this
 
-Three ideas drive the design, and each is worth a paragraph:
+Five ideas drive the design, and each is worth a paragraph:
 
 **The signer is isolated and trusts nobody.** It has no HTTP endpoint for
 signing — look at `signer/build.gradle.kts` and note the absence of a web
@@ -22,6 +22,14 @@ approval signature against its *own* list of trusted public keys, not the list
 in the event. An attacker who completely owns `custody-api` can mark a
 withdrawal approved in the database, but cannot forge approver signatures, so
 the signer refuses. Compromising the API alone does not move funds.
+
+**Two people have to agree, and the agreement is evidence rather than a flag.** An
+approver signs a statement of exactly what they are endorsing — this withdrawal, to
+this address, for this amount — and the server rebuilds that statement from its own
+record before checking the signature, so a signature over terms the caller chose
+cannot be recorded. The signatures are stored, not just checked, which is what lets
+the signer re-verify them later. Both services count the quorum independently, from
+two deliberately separate registries.
 
 **Money is tracked with a double-entry ledger.** Every movement is one journal
 transaction with entries summing to zero, in wei stored as `numeric(78,0)` — an
@@ -45,6 +53,14 @@ the database never approved. Instead the event is written as a row in the same
 transaction as the state change, and a relay moves it to Kafka. Delivery is
 at-least-once, so every consumer is idempotent.
 
+**Nothing is settled until the chain says so.** Broadcasting a transaction is not the
+same as the money having left: it can sit in the mempool, be dropped, be reorganised
+out of a block, or be mined and revert. So the client's funds stay held from the
+moment they ask until a receipt has three confirmations behind it, and only then does
+the ledger book the outflow. A reconciliation job then goes back and asks the chain
+whether what the ledger recorded is still true — a watcher cannot catch its own
+mistakes, because the thing that would reveal them is the thing it already believes.
+
 ## Architecture
 
 ```mermaid
@@ -63,7 +79,7 @@ flowchart LR
 | Module | Owns |
 | --- | --- |
 | `common` | The Kafka event contract, and the Ed25519 verification both services share. Deliberately has no Spring dependency. |
-| `custody-api` | Clients, the double-entry ledger, withdrawals, the REST API. |
+| `custody-api` | Clients, the double-entry ledger, withdrawals, approvals, confirmations, the REST API. |
 | `signer` | Wallet keys. The only component that can sign. |
 
 ## The ledger
@@ -677,15 +693,26 @@ Useful invocations:
 
 ## Milestones
 
+All seven have landed.
+
 | | Milestone | What it demonstrates |
 | --- | --- | --- |
 | ✅ | **M0** Skeleton | Multi-module Gradle, Docker stack, Flyway-owned schema, Testcontainers |
 | ✅ | **M1** Ledger | Double-entry posting, row locking, concurrency under 50 threads |
 | ✅ | **M2** Withdrawal API | API-first OpenAPI contract, idempotency keys, RFC 9457 errors |
+| ✅ | **M3** Approvals | Ed25519 four-eyes approval with amount-based quorum |
 | ✅ | **M4** Outbox and Kafka | Transactional outbox, `SKIP LOCKED` relay, idempotent consumers, DLT |
 | ✅ | **M5** Signer | Envelope encryption, nonce management, EIP-1559 signing and broadcast |
-| ✅ | **M3** Approvals | Ed25519 four-eyes approval with amount-based quorum |
 | ✅ | **M6** Confirmations | Receipt polling, settlement, reconciliation against the chain |
+
+**They were not built in that order, and the detour is the interesting part.** M4 and
+M5 came before M3, so the signer existed for a while with nothing able to produce an
+approval it would accept — and that was the right way round. It meant the signer was
+written against an empty `approvals` list and refused every withdrawal custody-api
+could publish, which is the correct behaviour rather than a gap, and it made the
+security argument impossible to fudge: the approval machinery had to satisfy a
+verifier that already existed and had not been written to accommodate it. Building
+them in numerical order would have let both halves drift towards each other.
 
 ## What a production system would do differently
 
@@ -713,7 +740,13 @@ This is a learning project, and the gaps are deliberate rather than overlooked:
   one.
 - Finality would use Ethereum's `finalized` block tag, not a fixed 3
   confirmations — that number exists to keep a local demo fast.
-- No authentication or authorisation on the API yet, one chain, one asset.
+- No authentication or authorisation on the API yet, one chain, one asset. That gap
+  shapes the approvals design rather than sitting beside it: nothing identifies who
+  *requested* a withdrawal, so "self-approval" is defined against the client whose
+  money it is — an approver registered to a client cannot approve that client's
+  withdrawals — instead of against the person who typed the request. With a
+  credential on the request, the rule would tighten to the obvious one, and the
+  registry already has the column for it.
 - Single Kafka broker with no replication, and plain-text passwords in
   `docker-compose.yml`. Local development configuration, not deployable.
 - The outbox relay stops its batch on a failed send, so one permanently unsendable
