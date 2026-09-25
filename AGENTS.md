@@ -125,7 +125,7 @@ than to discover them in a red run.
 | Spotless (Eclipse JDT) | Anything `./gradlew spotlessApply` would change |
 | Checkstyle | Unused imports, swallowed exceptions, `System.out`, methods over 12 branches, and **`float`/`double` anywhere** |
 | SpotBugs + find-sec-bugs | Null derefs, resource leaks, SQL injection, weak crypto, predictable RNG |
-| JaCoCo | Line coverage below 93%, per module (`-PcoverageMinimum=0` to bypass temporarily, never in a commit) |
+| JaCoCo | Line coverage below 94%, per module (`-PcoverageMinimum=0` to bypass temporarily, never in a commit) |
 | Gitleaks | Credentials anywhere in history, including Ethereum private keys |
 | Trivy over the CycloneDX SBOM | A new fixable HIGH or CRITICAL CVE |
 
