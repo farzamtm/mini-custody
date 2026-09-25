@@ -6,6 +6,7 @@ import static org.awaitility.Awaitility.await;
 import com.farzam.events.ApprovalStatement;
 import com.farzam.events.EventEnvelope;
 import com.farzam.events.EventJson;
+import com.farzam.events.EventSignature;
 import com.farzam.events.EventType;
 import com.farzam.events.Topics;
 import com.farzam.events.WithdrawalBroadcast;
@@ -14,12 +15,14 @@ import com.farzam.signer.support.AbstractSignerTest;
 import com.farzam.signer.support.CapturedLogs;
 import com.farzam.signer.support.TestRpc;
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.header.Header;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -75,6 +78,44 @@ class SignerEndToEndTest extends AbstractSignerTest {
         EventEnvelope published = EventJson.read(results.getFirst().value(), EventEnvelope.class);
         assertThat(published.eventType()).isEqualTo(EventType.WITHDRAWAL_BROADCAST);
         assertThat(published.payloadAs(WithdrawalBroadcast.class).txHash()).isEqualTo(signed.txHash());
+    }
+
+    /**
+     * The producing half of M7: what the relay puts on the topic is something custody-api can prove
+     * came from here.
+     *
+     * <p>Verified with {@link com.farzam.events.EventSignature} against the public key matching the
+     * configured seed — the same call custody-api makes — rather than by asserting the header is
+     * merely present. A header containing the right number of arbitrary bytes would satisfy a
+     * presence check and would be rejected by the real consumer, which is a test that passes while
+     * the system is broken.
+     */
+    @Test
+    void everyResultCarriesASignatureCustodyApiCanVerify() {
+        UUID withdrawalId = UUID.randomUUID();
+        String destination = freshAddress();
+
+        publish(
+                Topics.WITHDRAWALS,
+                withdrawalId,
+                approvalEvent(
+                        withdrawalId,
+                        destination,
+                        SMALL,
+                        List.of(APPROVER_ONE.approve(withdrawalId, destination, SMALL))));
+
+        List<ConsumerRecord<String, String>> results = drain(Topics.SIGNER_RESULTS, withdrawalId, WINDOW);
+        assertThat(results).hasSize(1);
+
+        ConsumerRecord<String, String> result = results.getFirst();
+        Header header = result.headers().lastHeader(EventSignature.HEADER);
+
+        assertThat(header).as("the relay attached a signature").isNotNull();
+        assertThat(
+                EventSignature
+                        .verify(RESULTS_PUBLIC_KEY, result.value(), new String(header.value(), StandardCharsets.UTF_8)))
+                .as("and it verifies against the signer's public key")
+                .isTrue();
     }
 
     @Test

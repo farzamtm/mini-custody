@@ -2,14 +2,17 @@ package com.farzam.crypto;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 
 import com.farzam.events.ApprovalStatement;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.Signature;
+import java.security.interfaces.EdECPrivateKey;
 import java.util.Arrays;
 import java.util.UUID;
 import org.junit.jupiter.api.RepeatedTest;
@@ -142,9 +145,93 @@ class Ed25519Test {
         assertThat(Ed25519.verify(accepted, MESSAGE, new byte[64])).isFalse();
     }
 
+    /**
+     * The round trip M7 depends on: a key loaded from a 32-byte seed signs something the matching
+     * public key verifies.
+     *
+     * <p>Repeated for the reason the packing tests are. The seed is expanded into a scalar before it
+     * is used, and an implementation that mixed up the seed with the expanded form would agree with
+     * itself and disagree with every other Ed25519 library — which is the kind of bug that only
+     * shows up against a counterparty.
+     */
+    @RepeatedTest(16)
+    void aKeyLoadedFromASeedSignsWhatItsPublicKeyVerifies() {
+        KeyPair pair = generate();
+        byte[] seed = seedOf(pair);
+
+        PrivateKey loaded = Ed25519.privateKeyFrom(seed);
+
+        assertThat(loaded).isEqualTo(pair.getPrivate());
+        assertThat(Ed25519.verify(pair.getPublic(), MESSAGE, Ed25519.sign(loaded, MESSAGE))).isTrue();
+    }
+
+    @Test
+    void aSeedOfTheWrongLengthIsRejectedLoudly() {
+        assertThatIllegalArgumentException().isThrownBy(() -> Ed25519.privateKeyFrom(new byte[31]))
+                .withMessageContaining("32 bytes, got 31");
+    }
+
+    /**
+     * {@link Ed25519#privateKeyFrom} copies the seed rather than keeping the caller's array.
+     *
+     * <p>{@code ResultSigningKey} zeroes its buffer as soon as the key is built, so a key that held
+     * a reference to it would sign with thirty-two zero bytes from then on — and would do it
+     * silently, producing signatures that are perfectly well-formed and verify against nothing.
+     */
+    @Test
+    void zeroingTheSeedAfterwardsDoesNotChangeWhatTheKeySigns() {
+        byte[] seed = seedOf(generate());
+        PrivateKey key = Ed25519.privateKeyFrom(seed);
+        byte[] before = Ed25519.sign(key, MESSAGE);
+
+        Arrays.fill(seed, (byte) 0);
+
+        assertThat(Ed25519.sign(key, MESSAGE)).isEqualTo(before);
+    }
+
+    /**
+     * A key of the wrong kind is a misconfiguration, so signing with one throws rather than
+     * returning something.
+     *
+     * <p>Reachable in a way the other {@code GeneralSecurityException} branches in this class are
+     * not: {@code initSign} rejects a key that is not Ed25519 outright. It is the branch worth
+     * proving, because the alternative behaviour — a signer that returned null or empty bytes — would
+     * publish an unsigned message and have it refused at the consumer, which is the exact failure the
+     * signature is there to prevent.
+     */
+    @Test
+    void signingWithAKeyThatIsNotEd25519IsAnIllegalState() {
+        KeyPair wrongCurve = generateEc();
+
+        assertThatIllegalStateException().isThrownBy(() -> Ed25519.sign(wrongCurve.getPrivate(), MESSAGE))
+                .withMessageContaining("could not sign");
+    }
+
+    /** Signatures are deterministic in Ed25519 — no RNG, so no way for a reused nonce to leak a key. */
+    @Test
+    void signingTheSameBytesTwiceGivesTheSameSignature() {
+        KeyPair pair = generate();
+
+        assertThat(Ed25519.sign(pair.getPrivate(), MESSAGE)).isEqualTo(Ed25519.sign(pair.getPrivate(), MESSAGE));
+    }
+
+    /** The raw 32 bytes behind a generated private key — what a deployment would configure. */
+    private static byte[] seedOf(KeyPair pair) {
+        return ((EdECPrivateKey) pair.getPrivate()).getBytes().orElseThrow();
+    }
+
     private static KeyPair generate() {
         try {
             return KeyPairGenerator.getInstance(Ed25519.ALGORITHM).generateKeyPair();
+        } catch (Exception impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    /** A perfectly good key pair of the wrong algorithm. EC rather than RSA because it is quick. */
+    private static KeyPair generateEc() {
+        try {
+            return KeyPairGenerator.getInstance("EC").generateKeyPair();
         } catch (Exception impossible) {
             throw new IllegalStateException(impossible);
         }

@@ -5,9 +5,12 @@ import com.farzam.custody.ledger.JournalKind;
 import com.farzam.custody.ledger.LedgerService;
 import com.farzam.custody.ledger.SystemAccounts;
 import com.farzam.custody.messaging.ProcessedEvents;
+import com.farzam.custody.messaging.SignerResultVerifier;
+import com.farzam.custody.messaging.UnauthenticEventException;
 import com.farzam.events.EventEnvelope;
 import com.farzam.events.EventFormatException;
 import com.farzam.events.EventJson;
+import com.farzam.events.EventSignature;
 import com.farzam.events.Topics;
 import com.farzam.events.WithdrawalBroadcast;
 import com.farzam.events.WithdrawalSigningFailed;
@@ -17,11 +20,18 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Applies what the signer reports back: a transaction hash, or a refusal.
+ *
+ * <p><b>Every message is authenticated before anything else happens.</b> A refusal releases a
+ * client's ledger hold, so a message this service cannot prove came from the signer is a message
+ * that can hand back money for a withdrawal the signer is broadcasting at that moment. The check is
+ * {@link SignerResultVerifier}, against a key from this service's own configuration — the same
+ * arrangement the signer uses for approvals, pointing the other way. ADR 0012 has the argument.
  *
  * <p>This is the idempotent-consumer pattern in full. Everything one message does — recording that
  * the message was seen, moving the withdrawal, releasing the hold — happens in one transaction, so
@@ -50,11 +60,14 @@ public class SigningResultListener {
 
     private static final Logger LOG = LoggerFactory.getLogger(SigningResultListener.class);
 
+    private final SignerResultVerifier verifier;
     private final ProcessedEvents processedEvents;
     private final WithdrawalRepository withdrawals;
     private final LedgerService ledger;
 
-    SigningResultListener(ProcessedEvents processedEvents, WithdrawalRepository withdrawals, LedgerService ledger) {
+    SigningResultListener(SignerResultVerifier verifier, ProcessedEvents processedEvents,
+            WithdrawalRepository withdrawals, LedgerService ledger) {
+        this.verifier = verifier;
         this.processedEvents = processedEvents;
         this.withdrawals = withdrawals;
         this.ledger = ledger;
@@ -72,6 +85,10 @@ public class SigningResultListener {
      * so a retry is a genuine retry rather than a replay that has already marked itself done.
      *
      * @param message the raw JSON envelope
+     * @param signature the signer's signature over those exact bytes, absent if the message carried
+     *     no such header
+     * @throws UnauthenticEventException if the message is not one the signer sent — registered as
+     *     non-retryable, so it is dead-lettered immediately
      * @throws EventFormatException if the message is not an event this service can read — registered
      *     as non-retryable, so it is dead-lettered immediately
      */
@@ -81,7 +98,16 @@ public class SigningResultListener {
                     + "free text, the signer's failure reason, is deliberately never logged.")
     @KafkaListener(topics = Topics.SIGNER_RESULTS, groupId = CONSUMER)
     @Transactional
-    public void onSigningResult(String message) {
+    public void onSigningResult(
+            String message,
+            @Header(name = EventSignature.HEADER, required = false) String signature) {
+
+        // Before the parse, and before processed_events. Ahead of the parse because an unauthentic
+        // message should cost as little as possible; ahead of the duplicate check because
+        // markProcessed is a write, and letting an attacker insert rows keyed on ids they choose is
+        // a small denial-of-service against the one table that makes redelivery safe.
+        verifier.require(message, signature);
+
         EventEnvelope event = EventJson.read(message, EventEnvelope.class);
 
         if (!processedEvents.markProcessed(CONSUMER, event.eventId())) {

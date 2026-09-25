@@ -63,6 +63,23 @@ signer:
     # a secret with no reader.
     import-private-key: ${SIGNER_HOT_WALLET_PRIVATE_KEY:}
 
+  results:
+    # The Ed25519 private key this service authenticates its own results with,
+    # raw 32-byte seed, base64. custody-api holds the matching public key in
+    # `custody.signer-results.public-key` and rejects anything that does not
+    # verify against it. See ADR 0012.
+    #
+    # Not the wallet key and not the master key: this one cannot move funds, so
+    # it rotates on its own schedule and a leak is an authenticity problem rather
+    # than a custody one.
+    #
+    # Unlike the policy below, an empty value here is a startup failure rather
+    # than a fail-closed default. A signer that cannot sign is safe — nothing
+    # moves. A signer that signs transactions but cannot authenticate the results
+    # it reports is not: it broadcasts on chain and then has every report
+    # rejected, stranding the withdrawal with the client's funds held.
+    signing-key: ${SIGNER_RESULTS_SIGNING_KEY:}
+
   policy:
     # The hot-wallet cap. A hot wallet is online and automated by definition, so
     # this number is what an attacker who owns everything upstream gets per

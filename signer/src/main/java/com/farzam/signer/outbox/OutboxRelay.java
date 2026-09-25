@@ -2,10 +2,12 @@ package com.farzam.signer.outbox;
 
 import com.farzam.events.EventEnvelope;
 import com.farzam.events.EventJson;
+import com.farzam.events.EventSignature;
 import com.farzam.events.EventType;
 import com.fasterxml.jackson.databind.JsonNode;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.Serial;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -14,6 +16,7 @@ import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -44,6 +47,12 @@ import org.springframework.transaction.annotation.Transactional;
  * <p><b>A failed send stops the batch rather than skipping the row.</b> Ordering per withdrawal is
  * bought by keying on the withdrawal id, and stepping over an unsendable row could publish a later
  * event about the same withdrawal before an earlier one.
+ *
+ * <p><b>Every message carries an Ed25519 signature over its own bytes.</b> This is the one place the
+ * signer's copy of the relay does something custody-api's does not, and it is why ADR 0009's
+ * duplication is now load-bearing rather than merely tolerated. custody-api refuses a result it
+ * cannot verify, because believing an unauthenticated "the signer refused" releases a ledger hold
+ * for a withdrawal that is being broadcast at that moment. See {@link ResultSigningKey} and ADR 0012.
  */
 @Component
 public class OutboxRelay {
@@ -83,14 +92,16 @@ public class OutboxRelay {
 
     private final JdbcClient jdbc;
     private final KafkaTemplate<String, String> kafka;
+    private final ResultSigningKey signingKey;
     private final int batchSize;
     private final Duration ackTimeout;
 
-    OutboxRelay(JdbcClient jdbc, KafkaTemplate<String, String> kafka,
+    OutboxRelay(JdbcClient jdbc, KafkaTemplate<String, String> kafka, ResultSigningKey signingKey,
             @Value("${outbox.relay.batch-size:100}") int batchSize,
             @Value("${outbox.relay.ack-timeout:5s}") Duration ackTimeout) {
         this.jdbc = jdbc;
         this.kafka = kafka;
+        this.signingKey = signingKey;
         this.batchSize = batchSize;
         this.ackTimeout = ackTimeout;
     }
@@ -144,14 +155,24 @@ public class OutboxRelay {
      * <p>The wait is the point: {@code send} is asynchronous, so without blocking on the future the
      * relay would mark rows published on the strength of having put them in the producer's buffer.
      * With {@code acks=all} the future completes only once the message cannot be lost by the broker.
+     *
+     * <p><b>The signature is computed here, over the bytes that are actually sent.</b> Signing
+     * earlier — in {@link OutboxWriter}, against the payload — would sign something other than what
+     * leaves the process, and the gap between the two is where a bug would live. Signing the
+     * serialised envelope means the header covers the event id, the type, the timestamp, the
+     * aggregate id and the payload together, so none of them can be edited in flight. Because every
+     * field of the envelope comes from the row rather than from the clock, a republished row
+     * produces the same bytes and therefore the same signature, and the consumer's duplicate check
+     * behaves exactly as it did before M7.
      */
     private void publish(Row row) {
         String message = EventJson.write(row.toEnvelope());
+        var record = new ProducerRecord<>(row.topic(), null, row.aggregateId().toString(), message);
+        record.headers().add(EventSignature.HEADER, signingKey.sign(message).getBytes(StandardCharsets.UTF_8));
         try {
             // The key is the withdrawal id, so one withdrawal's events hash to one partition and
             // arrive in the order they were written.
-            kafka.send(row.topic(), row.aggregateId().toString(), message)
-                    .get(ackTimeout.toMillis(), TimeUnit.MILLISECONDS);
+            kafka.send(record).get(ackTimeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException interrupted) {
             // Restore the flag: swallowing it would hide a shutdown request from the scheduler.
             Thread.currentThread().interrupt();

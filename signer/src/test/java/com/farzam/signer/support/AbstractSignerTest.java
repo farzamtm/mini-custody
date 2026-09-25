@@ -1,12 +1,17 @@
 package com.farzam.signer.support;
 
+import com.farzam.crypto.Ed25519;
 import com.farzam.events.EventEnvelope;
 import com.farzam.events.EventJson;
 import com.farzam.events.EventType;
 import com.farzam.events.WithdrawalApproved;
 import java.math.BigInteger;
 import java.security.GeneralSecurityException;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.PublicKey;
 import java.security.SecureRandom;
+import java.security.interfaces.EdECPrivateKey;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -77,6 +82,12 @@ public abstract class AbstractSignerTest {
     /** Base64. The other value that test looks for. */
     protected static final String MASTER_KEY;
 
+    /** Base64 seed, for {@code signer.results.signing-key}. Generated per run like everything else. */
+    protected static final String RESULTS_SIGNING_KEY;
+
+    /** The matching public key, for a test that verifies what the relay published. */
+    protected static final PublicKey RESULTS_PUBLIC_KEY;
+
     static {
         POSTGRES.start();
         KAFKA.start();
@@ -89,6 +100,11 @@ public abstract class AbstractSignerTest {
         byte[] masterKey = new byte[MASTER_KEY_BYTES];
         new SecureRandom().nextBytes(masterKey);
         MASTER_KEY = Base64.getEncoder().encodeToString(masterKey);
+
+        KeyPair results = generateResultsKey();
+        RESULTS_SIGNING_KEY = Base64.getEncoder()
+                .encodeToString(((EdECPrivateKey) results.getPrivate()).getBytes().orElseThrow());
+        RESULTS_PUBLIC_KEY = results.getPublic();
 
         new TestRpc(ANVIL.rpcUrl()).setBalance(HOT_WALLET_ADDRESS, HOT_WALLET_FUNDING);
     }
@@ -119,6 +135,11 @@ public abstract class AbstractSignerTest {
         registry.add("signer.policy.trusted-approvers[0].public-key", APPROVER_ONE::publicKeyBase64);
         registry.add("signer.policy.trusted-approvers[1].id", APPROVER_TWO::id);
         registry.add("signer.policy.trusted-approvers[1].public-key", APPROVER_TWO::publicKeyBase64);
+
+        // Without this the context does not start at all: an absent results key is a startup
+        // failure rather than a fail-closed default, because a signer that signs transactions and
+        // cannot authenticate its own reports strands every withdrawal it handles.
+        registry.add("signer.results.signing-key", () -> RESULTS_SIGNING_KEY);
 
         // The retry job is driven by the tests that care about it, not by a timer. A test that has to
         // sleep to find out what happened fails on a loaded CI runner for no reason.
@@ -262,6 +283,15 @@ public abstract class AbstractSignerTest {
             return Keys.createEcKeyPair();
         } catch (GeneralSecurityException impossible) {
             throw new IllegalStateException("could not generate a secp256k1 key pair", impossible);
+        }
+    }
+
+    /** Ed25519, and nothing to do with the wallet: this one authenticates results, it cannot spend. */
+    private static KeyPair generateResultsKey() {
+        try {
+            return KeyPairGenerator.getInstance(Ed25519.ALGORITHM).generateKeyPair();
+        } catch (GeneralSecurityException impossible) {
+            throw new IllegalStateException("this JDK has no Ed25519", impossible);
         }
     }
 }

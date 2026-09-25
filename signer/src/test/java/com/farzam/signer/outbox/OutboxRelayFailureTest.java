@@ -46,6 +46,9 @@ class OutboxRelayFailureTest extends AbstractSignerTest {
     @Autowired
     private PlatformTransactionManager transactionManager;
 
+    @Autowired
+    private ResultSigningKey signingKey;
+
     @Test
     void aRowThatCannotBeSentStaysUnpublishedAndDoesNotBlowUpTheBatch() {
         UUID withdrawalId = UUID.randomUUID();
@@ -88,7 +91,7 @@ class OutboxRelayFailureTest extends AbstractSignerTest {
                         1000,
                         ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG,
                         500));
-        return new OutboxRelay(jdbc, new KafkaTemplate<>(producers), 10, Duration.ofSeconds(2));
+        return new OutboxRelay(jdbc, new KafkaTemplate<>(producers), signingKey, 10, Duration.ofSeconds(2));
     }
 
     private boolean isStillUnpublished(UUID eventId) {
