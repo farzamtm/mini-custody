@@ -20,20 +20,18 @@ Three shorter ways in, depending on what you came for:
 then the [architecture diagram](#architecture). Six ideas, one paragraph each.
 
 **The most interesting thing that happened** — a review of this repository found an
-exploitable double-spend in its own design. `custody-api` believed anything that
-appeared on the signer's results topic, and one of the messages it believed was "the
-signer refused, give the money back" — which releases a ledger hold. So anyone able to
-produce to that topic could have a client credited back while the real signer went on
-signing and broadcasting the same withdrawal: the ETH leaves the hot wallet and the
-books say it never did. The uncomfortable part is that an integration test already in
-the repository *was* the exploit, written months earlier as a happy-path assertion; the
-only difference between it and an attacker was who held the producer.
+exploitable double-spend in its own design. `custody-api` believed anything on the
+signer's results topic, including "the signer refused, give the money back", which
+releases a ledger hold: anyone able to produce to that topic could have a client
+credited back while the real signer broadcast the same withdrawal anyway. An
+integration test already in the repository *was* the exploit, written months earlier
+as a happy-path assertion.
 [ADR 0012](docs/adr/0012-signer-results-are-authenticated-the-way-approvals-are.md) is
 the write-up — the exploit, the fix, and four alternatives rejected with reasons.
 
-**Whether any of it actually works** — [Running it](#running-it) is a copy-pasteable
-walk-through from deposit to a mined transaction, including a fabricated refusal you can
-publish yourself to watch the check above reject it. [Quality gates](#quality-gates) is
+**Whether any of it actually works** — [Running it](#running-it) is a walk-through from
+deposit to a mined transaction, including a fabricated refusal you can publish yourself
+to watch the check above reject it. [Quality gates](#quality-gates) is
 what CI enforces on every pull request.
 
 If you read one class, read
@@ -45,6 +43,7 @@ it is where the claim "compromising the API does not move funds" is either true 
 
 - [Why it looks like this](#why-it-looks-like-this) — the six ideas driving the design
 - [Architecture](#architecture) — the three modules and what crosses between them
+- [Running it](#running-it) — the full walk-through, and how the tests are built
 - [The ledger](#the-ledger) — double-entry, append-only, and the three properties with tests
 - [The API](#the-api) — contract-first, idempotency keys, RFC 9457 errors
 - [Approvals](#approvals) — four eyes, and why the signature covers a rebuilt statement
@@ -54,7 +53,6 @@ it is where the claim "compromising the API does not move funds" is either true 
   - [Nonces, and why a retry never re-signs](#nonces-and-why-a-retry-never-re-signs)
 - [Confirmations and settlement](#confirmations-and-settlement) — why broadcast is not settled
   - [Reconciliation](#reconciliation) — asking the chain whether the ledger is still true
-- [Running it](#running-it) — the full walk-through, and how the tests are built
 - [Quality gates](#quality-gates) — what CI rejects, and why each gate is configured that way
 - [Milestones](#milestones) — what each step demonstrates, and why they were built out of order
 - [What a production system would do differently](#what-a-production-system-would-do-differently) — the deliberate gaps
@@ -137,6 +135,182 @@ flowchart LR
 | `common` | The Kafka event contract, and the Ed25519 signing and verification both services share. Deliberately has no Spring dependency. |
 | `custody-api` | Clients, the double-entry ledger, withdrawals, approvals, confirmations, the REST API. |
 | `signer` | Wallet keys. The only component that can sign. |
+
+## Running it
+
+Requires JDK 25 and Docker. This comes before the design sections on purpose: the
+walk-through is the shortest way to see the thing the rest of the document argues
+about, and the sections after it explain why each step is shaped the way it is.
+
+```bash
+docker compose up -d      # Postgres, Kafka (KRaft), Anvil
+./gradlew build           # compiles and runs the tests
+./gradlew :custody-api:bootRun
+```
+
+`bootRun` starts with the `dev` profile, which is what maps `POST /dev/deposits` —
+a local instance with no way to put money into it is not much use. A real deployment
+sets its own profile and the endpoint's bean is never created, so the path simply
+does not exist.
+
+The whole flow, against a running instance. It is not a single paste: the approval
+below succeeds, and then the signer refuses it until you generate two key pairs and
+restart both services with them, which is the design rather than a rough edge.
+
+```bash
+CLIENT=$(uuidgen | tr 'A-Z' 'a-z')
+DEST=0x70997970c51812dc3a010c7d01b50e0d17dc79c8
+
+ACCOUNT=$(curl -s localhost:8080/dev/deposits -H 'Content-Type: application/json' \
+  -d "{\"clientId\":\"$CLIENT\",\"amountWei\":\"1000000000000000000\"}" | jq -r .id)
+
+curl -s localhost:8080/v1/clients/$CLIENT/whitelist -H 'Content-Type: application/json' \
+  -d "{\"address\":\"$DEST\"}"
+
+WITHDRAWAL=$(curl -s localhost:8080/v1/withdrawals -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d "{\"accountId\":\"$ACCOUNT\",\"destination\":\"$DEST\",\"amountWei\":\"400000000000000000\"}" | jq -r .id)
+
+curl -s localhost:8080/v1/accounts/$ACCOUNT   # 600000000000000000 — 0.4 is held
+```
+
+Send the withdrawal request twice with the same `Idempotency-Key` and the balance
+still reads 0.6: the retry returns the original withdrawal and holds nothing extra.
+
+Now approve it, which needs an approver with a real key pair:
+
+```bash
+openssl genpkey -algorithm ed25519 -out /tmp/alice.pem
+
+# The raw 32 bytes, which is what the registry and the signer both hold. An Ed25519
+# SubjectPublicKeyInfo is a fixed twelve-byte DER prefix and then the key, so the
+# last 32 bytes of the DER form are the key itself.
+PUBKEY=$(openssl pkey -in /tmp/alice.pem -pubout -outform DER | tail -c 32 | base64)
+
+APPROVER=$(curl -s localhost:8080/dev/approvers -H 'Content-Type: application/json' \
+  -d "{\"name\":\"alice\",\"publicKey\":\"$PUBKEY\"}" | jq -r .id)
+
+# Exactly the bytes the server will rebuild and verify against: three keys, sorted,
+# no whitespace, and no trailing newline. Get any of that wrong and the signature is
+# over a different document, which is the whole idea.
+printf '{"amountWei":"400000000000000000","destination":"%s","withdrawalId":"%s"}' \
+  "$DEST" "$WITHDRAWAL" > /tmp/statement.json
+
+SIGNATURE=$(openssl pkeyutl -sign -rawin -inkey /tmp/alice.pem -in /tmp/statement.json | base64)
+
+curl -s localhost:8080/v1/withdrawals/$WITHDRAWAL/approvals -H 'Content-Type: application/json' \
+  -d "{\"approverId\":\"$APPROVER\",\"signature\":\"$SIGNATURE\"}"
+# {"collected":1,"required":1,"status":"APPROVED", …} — 0.4 ETH is below the
+# four-eyes threshold, so one approver is the quorum
+```
+
+Change a digit of the amount in `statement.json` and the same call returns `422` with
+`"code":"INVALID_APPROVAL_SIGNATURE"`: the server signs off on what it holds, not on
+what was sent. Try 2 ETH instead of 0.4 and the first approval comes back
+`"collected":1,"required":2` — and submitting the same approver's signature again is a
+`409`, because a quorum counts people.
+
+The approval writes an outbox row in the same transaction as the status change, and the
+relay publishes it within about half a second. Watch it leave:
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic custody.withdrawals.v1 --from-beginning
+```
+
+The signer consumes it — and still refuses it, unless you have also put Alice's public
+key in *its* configuration. It also needs a key pair of its own, so that `custody-api`
+can tell a real result from a forged one:
+
+```bash
+# The signer's results key. Ed25519 again, and nothing to do with the wallet: this one
+# cannot spend anything, it only proves a message came from the signer. The seed is the
+# last 32 bytes of the DER private key, as the public key is of the DER public key.
+openssl genpkey -algorithm ed25519 -out /tmp/signer-results.pem
+RESULTS_SEED=$(openssl pkey -in /tmp/signer-results.pem -outform DER | tail -c 32 | base64)
+RESULTS_PUBKEY=$(openssl pkey -in /tmp/signer-results.pem -pubout -outform DER | tail -c 32 | base64)
+
+SIGNER_POLICY_TRUSTED_APPROVERS_0_ID=$APPROVER \
+SIGNER_POLICY_TRUSTED_APPROVERS_0_PUBLIC_KEY=$PUBKEY \
+SIGNER_RESULTS_SIGNING_KEY=$RESULTS_SEED \
+  ./gradlew :signer:bootRun
+```
+
+`custody-api` needs the matching public key, so restart it with:
+
+```bash
+CUSTODY_SIGNER_RESULTS_PUBLIC_KEY=$RESULTS_PUBKEY ./gradlew :custody-api:bootRun
+```
+
+Leave that one out and the withdrawal is signed and broadcast but never progresses past
+`APPROVED`: every result is refused and lands on `signer.results.v1.DLT`. That is the
+fail-closed direction and it is loud, which is the point —
+[ADR 0012](docs/adr/0012-signer-results-are-authenticated-the-way-approvals-are.md) has
+the argument for why the alternative default is much worse. You can watch the refusal
+happen by publishing a fabricated one yourself:
+
+```bash
+# A hand-built refusal for a withdrawal that is waiting to be signed. Before M7 this
+# released the hold and credited the client back while the signer broadcast the
+# transaction anyway. Now it goes straight to the dead-letter topic.
+printf '{"aggregateId":"%s","eventId":"%s","eventType":"withdrawal.signing-failed.v1","occurredAt":"%s","payload":{"reason":"give it back","withdrawalId":"%s"}}' \
+  "$WITHDRAWAL" "$(uuidgen | tr 'A-Z' 'a-z')" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$WITHDRAWAL" \
+  | docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh \
+      --bootstrap-server localhost:9092 --topic signer.results.v1
+
+curl -s localhost:8080/v1/accounts/$ACCOUNT   # still 600000000000000000 — nothing came back
+```
+
+That second step is not friction to be smoothed away, it is the design. The signer
+verifies against keys that arrived with its deployment and never reads custody's
+`approvers` table, so an attacker who owns custody-api completely can register
+themselves as an approver, sign their own withdrawal, and get exactly as far as a
+refusal. `POST /dev/withdrawals/{id}/approve` is still there to demonstrate the same
+thing from the other direction: it approves with nobody approving, publishes an event
+with an empty `approvals` list, and the signer says no.
+
+`SignerEndToEndTest` drives the whole path in one process — it generates a key pair,
+configures it as trusted, funds a wallet on Anvil and follows a withdrawal through to a
+mined transaction.
+
+Once something *has* been signed and broadcast, the confirmation watcher takes over on
+its own. Compose runs Anvil with `--block-time 2`, so blocks arrive whether or not
+anybody is asking, and the withdrawal walks itself the rest of the way:
+
+```bash
+# BROADCAST, then "confirmations": 1, 2, 3, then CONFIRMED — about six seconds
+watch -n1 "curl -s localhost:8080/v1/withdrawals/$WITHDRAWAL | jq '{status, confirmations, txHash}'"
+
+curl -s localhost:8080/v1/accounts/$ACCOUNT   # still 0.6: the hold became an outflow,
+                                              # it did not come back
+
+curl -s localhost:8080/v1/reconciliation | jq
+# {"agrees": true, "confirmedChecked": 1, "inFlightChecked": 0, "approvedChecked": 0,
+#  "discrepancies": []}
+#
+# The three counts are why `agrees` can be trusted: a run that checked nothing also
+# agrees. `approvedChecked` is the bucket that catches a withdrawal the signer never
+# got to — funds held, and nothing retrying.
+```
+
+Note what settlement did *not* do to the client's balance. The 0.4 ETH left
+`PENDING_OUT` for `EXTERNAL` rather than returning to the client, which is the whole
+difference between a confirmed withdrawal and a failed one — and the gas came out of
+`BANK_OPERATING`, so the client paid 0.4 ETH for a 0.4 ETH withdrawal.
+
+Tests use [Testcontainers](https://testcontainers.com/), so they start their own
+throwaway Postgres, Kafka and Anvil and do not need the Compose stack running. A
+real Postgres rather than H2, because the ledger depends on
+`FOR UPDATE SKIP LOCKED`, `jsonb`, partial indexes and `numeric(78,0)` — an H2 test
+would pass while production broke. A real Anvil rather than a stub node in both
+services, for two different reasons: the signer's tests are asking whether the bytes
+it produced are a transaction the EVM accepts, and custody-api's are asking whether it
+reads a real receipt correctly — `status` as `"0x1"` and not `true`,
+`effectiveGasPrice` rather than `gasPrice`, a JSON `null` for a transaction that is not
+mined. A canned response would confirm the test author's assumption instead of checking
+it. The watcher's Anvil runs with `--no-mining` so a test can say exactly how many
+blocks exist, and `evm_snapshot`/`evm_revert` is how the reorg case is staged: a real
+transaction that really was mined and really is not there any more.
 
 ## The ledger
 
@@ -428,12 +602,8 @@ a private key `custody-api` has never held.
 | --- | --- |
 | The destination is not a well-formed address | Nothing downstream should be guessing what was meant |
 | The amount is zero, negative, or over the hot-wallet cap | A hot wallet is automated, so its cap is what an attacker gets per transaction |
-| Fewer valid approvals than the amount needs | Two distinct approvers at or above 1 ETH, one below |
+| Fewer valid approvals than the amount needs | Two *distinct* approvers at or above 1 ETH, one below — [the same rule custody-api enforces](#approvals), counted here from a set of ids rather than from a table this service cannot see |
 | A signature does not verify, or the approver is not trusted | The point of the whole exercise |
-
-**Quorum counts approvers, not approvals.** Counting rows would let one approver
-satisfy a two-approver quorum by sending their valid signature twice, which is a
-copy-paste away and defeats four-eyes entirely.
 
 **A refusal is published, not thrown.** Letting it escape the listener would roll
 the transaction back, retry three times and dead-letter the message — leaving the
@@ -539,8 +709,8 @@ direction, since the other one settles the ledger for money that never moved.
 **Gas is the custodian's cost.** `BANK_OPERATING −fee / EXTERNAL +fee`, booked for a
 revert as well as a success, because the chain charges for both — a fee only recorded
 on the happy path is a ledger that drifts from the hot wallet by exactly the amount of
-every failure. A withdrawal of 0.4 ETH that cost the client more than 0.4 ETH is not
-what the client was told, so `V5__confirmations.sql` seeds `BANK_OPERATING` with a
+every failure. [Why the fee is the custodian's](#the-ledger) rather than the client's is
+in the ledger section; `V5__confirmations.sql` is what seeds `BANK_OPERATING` with a
 float to pay it from.
 
 **An unreachable node settles nothing.** The exception propagates, the transaction
@@ -591,178 +761,6 @@ every run would train everybody to ignore the whole report.
 Why the confirmation count is inclusive, why the receipt is stored at all, and why the
 reconciler has no write path:
 [ADR 0011](docs/adr/0011-settlement-waits-for-confirmations-and-reconciliation-only-reports.md).
-
-## Running it
-
-Requires JDK 25 and Docker.
-
-```bash
-docker compose up -d      # Postgres, Kafka (KRaft), Anvil
-./gradlew build           # compiles and runs the tests
-./gradlew :custody-api:bootRun
-```
-
-`bootRun` starts with the `dev` profile, which is what maps `POST /dev/deposits` —
-a local instance with no way to put money into it is not much use. A real deployment
-sets its own profile and the endpoint's bean is never created, so the path simply
-does not exist.
-
-The whole flow, against a running instance:
-
-```bash
-CLIENT=$(uuidgen | tr 'A-Z' 'a-z')
-DEST=0x70997970c51812dc3a010c7d01b50e0d17dc79c8
-
-ACCOUNT=$(curl -s localhost:8080/dev/deposits -H 'Content-Type: application/json' \
-  -d "{\"clientId\":\"$CLIENT\",\"amountWei\":\"1000000000000000000\"}" | jq -r .id)
-
-curl -s localhost:8080/v1/clients/$CLIENT/whitelist -H 'Content-Type: application/json' \
-  -d "{\"address\":\"$DEST\"}"
-
-WITHDRAWAL=$(curl -s localhost:8080/v1/withdrawals -H 'Content-Type: application/json' \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -d "{\"accountId\":\"$ACCOUNT\",\"destination\":\"$DEST\",\"amountWei\":\"400000000000000000\"}" | jq -r .id)
-
-curl -s localhost:8080/v1/accounts/$ACCOUNT   # 600000000000000000 — 0.4 is held
-```
-
-Send the withdrawal request twice with the same `Idempotency-Key` and the balance
-still reads 0.6: the retry returns the original withdrawal and holds nothing extra.
-
-Now approve it, which needs an approver with a real key pair:
-
-```bash
-openssl genpkey -algorithm ed25519 -out /tmp/alice.pem
-
-# The raw 32 bytes, which is what the registry and the signer both hold. An Ed25519
-# SubjectPublicKeyInfo is a fixed twelve-byte DER prefix and then the key, so the
-# last 32 bytes of the DER form are the key itself.
-PUBKEY=$(openssl pkey -in /tmp/alice.pem -pubout -outform DER | tail -c 32 | base64)
-
-APPROVER=$(curl -s localhost:8080/dev/approvers -H 'Content-Type: application/json' \
-  -d "{\"name\":\"alice\",\"publicKey\":\"$PUBKEY\"}" | jq -r .id)
-
-# Exactly the bytes the server will rebuild and verify against: three keys, sorted,
-# no whitespace, and no trailing newline. Get any of that wrong and the signature is
-# over a different document, which is the whole idea.
-printf '{"amountWei":"400000000000000000","destination":"%s","withdrawalId":"%s"}' \
-  "$DEST" "$WITHDRAWAL" > /tmp/statement.json
-
-SIGNATURE=$(openssl pkeyutl -sign -rawin -inkey /tmp/alice.pem -in /tmp/statement.json | base64)
-
-curl -s localhost:8080/v1/withdrawals/$WITHDRAWAL/approvals -H 'Content-Type: application/json' \
-  -d "{\"approverId\":\"$APPROVER\",\"signature\":\"$SIGNATURE\"}"
-# {"collected":1,"required":1,"status":"APPROVED", …} — 0.4 ETH is below the
-# four-eyes threshold, so one approver is the quorum
-```
-
-Change a digit of the amount in `statement.json` and the same call returns `422` with
-`"code":"INVALID_APPROVAL_SIGNATURE"`: the server signs off on what it holds, not on
-what was sent. Try 2 ETH instead of 0.4 and the first approval comes back
-`"collected":1,"required":2` — and submitting the same approver's signature again is a
-`409`, because a quorum counts people.
-
-The approval writes an outbox row in the same transaction as the status change, and the
-relay publishes it within about half a second. Watch it leave:
-
-```bash
-docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 --topic custody.withdrawals.v1 --from-beginning
-```
-
-The signer consumes it — and still refuses it, unless you have also put Alice's public
-key in *its* configuration. It also needs a key pair of its own, so that `custody-api`
-can tell a real result from a forged one:
-
-```bash
-# The signer's results key. Ed25519 again, and nothing to do with the wallet: this one
-# cannot spend anything, it only proves a message came from the signer. The seed is the
-# last 32 bytes of the DER private key, as the public key is of the DER public key.
-openssl genpkey -algorithm ed25519 -out /tmp/signer-results.pem
-RESULTS_SEED=$(openssl pkey -in /tmp/signer-results.pem -outform DER | tail -c 32 | base64)
-RESULTS_PUBKEY=$(openssl pkey -in /tmp/signer-results.pem -pubout -outform DER | tail -c 32 | base64)
-
-SIGNER_POLICY_TRUSTED_APPROVERS_0_ID=$APPROVER \
-SIGNER_POLICY_TRUSTED_APPROVERS_0_PUBLIC_KEY=$PUBKEY \
-SIGNER_RESULTS_SIGNING_KEY=$RESULTS_SEED \
-  ./gradlew :signer:bootRun
-```
-
-`custody-api` needs the matching public key, so restart it with:
-
-```bash
-CUSTODY_SIGNER_RESULTS_PUBLIC_KEY=$RESULTS_PUBKEY ./gradlew :custody-api:bootRun
-```
-
-Leave that one out and the withdrawal is signed and broadcast but never progresses past
-`APPROVED`: every result is refused and lands on `signer.results.v1.DLT`. That is the
-fail-closed direction and it is loud, which is the point —
-[ADR 0012](docs/adr/0012-signer-results-are-authenticated-the-way-approvals-are.md) has
-the argument for why the alternative default is much worse. You can watch the refusal
-happen by publishing a fabricated one yourself:
-
-```bash
-# A hand-built refusal for a withdrawal that is waiting to be signed. Before M7 this
-# released the hold and credited the client back while the signer broadcast the
-# transaction anyway. Now it goes straight to the dead-letter topic.
-printf '{"aggregateId":"%s","eventId":"%s","eventType":"withdrawal.signing-failed.v1","occurredAt":"%s","payload":{"reason":"give it back","withdrawalId":"%s"}}' \
-  "$WITHDRAWAL" "$(uuidgen | tr 'A-Z' 'a-z')" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$WITHDRAWAL" \
-  | docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh \
-      --bootstrap-server localhost:9092 --topic signer.results.v1
-
-curl -s localhost:8080/v1/accounts/$ACCOUNT   # still 600000000000000000 — nothing came back
-```
-
-That second step is not friction to be smoothed away, it is the design. The signer
-verifies against keys that arrived with its deployment and never reads custody's
-`approvers` table, so an attacker who owns custody-api completely can register
-themselves as an approver, sign their own withdrawal, and get exactly as far as a
-refusal. `POST /dev/withdrawals/{id}/approve` is still there to demonstrate the same
-thing from the other direction: it approves with nobody approving, publishes an event
-with an empty `approvals` list, and the signer says no.
-
-`SignerEndToEndTest` drives the whole path in one process — it generates a key pair,
-configures it as trusted, funds a wallet on Anvil and follows a withdrawal through to a
-mined transaction.
-
-Once something *has* been signed and broadcast, the confirmation watcher takes over on
-its own. Compose runs Anvil with `--block-time 2`, so blocks arrive whether or not
-anybody is asking, and the withdrawal walks itself the rest of the way:
-
-```bash
-# BROADCAST, then "confirmations": 1, 2, 3, then CONFIRMED — about six seconds
-watch -n1 "curl -s localhost:8080/v1/withdrawals/$WITHDRAWAL | jq '{status, confirmations, txHash}'"
-
-curl -s localhost:8080/v1/accounts/$ACCOUNT   # still 0.6: the hold became an outflow,
-                                              # it did not come back
-
-curl -s localhost:8080/v1/reconciliation | jq
-# {"agrees": true, "confirmedChecked": 1, "inFlightChecked": 0, "approvedChecked": 0,
-#  "discrepancies": []}
-#
-# The three counts are why `agrees` can be trusted: a run that checked nothing also
-# agrees. `approvedChecked` is the bucket that catches a withdrawal the signer never
-# got to — funds held, and nothing retrying.
-```
-
-Note what settlement did *not* do to the client's balance. The 0.4 ETH left
-`PENDING_OUT` for `EXTERNAL` rather than returning to the client, which is the whole
-difference between a confirmed withdrawal and a failed one — and the gas came out of
-`BANK_OPERATING`, so the client paid 0.4 ETH for a 0.4 ETH withdrawal.
-
-Tests use [Testcontainers](https://testcontainers.com/), so they start their own
-throwaway Postgres, Kafka and Anvil and do not need the Compose stack running. A
-real Postgres rather than H2, because the ledger depends on
-`FOR UPDATE SKIP LOCKED`, `jsonb`, partial indexes and `numeric(78,0)` — an H2 test
-would pass while production broke. A real Anvil rather than a stub node in both
-services, for two different reasons: the signer's tests are asking whether the bytes
-it produced are a transaction the EVM accepts, and custody-api's are asking whether it
-reads a real receipt correctly — `status` as `"0x1"` and not `true`,
-`effectiveGasPrice` rather than `gasPrice`, a JSON `null` for a transaction that is not
-mined. A canned response would confirm the test author's assumption instead of checking
-it. The watcher's Anvil runs with `--no-mining` so a test can say exactly how many
-blocks exist, and `evm_snapshot`/`evm_revert` is how the reorg case is staged: a real
-transaction that really was mined and really is not there any more.
 
 ## Quality gates
 
@@ -902,13 +900,11 @@ This is a learning project, and the gaps are deliberate rather than overlooked:
   M6 struck for a stuck broadcast. Acting on it is still a person's job, and the
   relay still has no attempt counter.
 - Nothing consumes either dead-letter topic. A message that fails its retries on
-  `signer.results.v1` or `custody.withdrawals.v1` lands somewhere nobody reads. That
-  matters most on the signer's side, where the listener makes live JSON-RPC calls
-  inside its transaction and gets three attempts over about a second and a half — so
-  an Ethereum node that is briefly unreachable at the wrong moment dead-letters the
-  approval and strands the withdrawal for good. Reconciliation makes it visible; a
-  production system would redrive the topic, and would give a transient
-  `RpcException` a far longer budget than a malformed event deserves.
+  `signer.results.v1` or `custody.withdrawals.v1` lands somewhere nobody reads, which
+  matters most on the signer's side — a briefly unreachable Ethereum node strands the
+  withdrawal for good, for the reasons under [Reconciliation](#reconciliation). That
+  report makes it visible; a production system would redrive the topic, and would give
+  a transient `RpcException` a far longer budget than a malformed event deserves.
 - Both services carry their own copy of the outbox writer and relay. The second
   copy arrived with M5 and has not been extracted into a shared module yet —
   [ADR 0009](docs/adr/0009-the-outbox-is-duplicated-rather-than-extracted-for-now.md)
