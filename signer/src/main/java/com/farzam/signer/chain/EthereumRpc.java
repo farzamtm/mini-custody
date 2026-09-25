@@ -55,6 +55,15 @@ public class EthereumRpc {
     private static final Pattern HEX = Pattern.compile("^(0x)?([0-9a-fA-F]{2})+$");
 
     /**
+     * A JSON-RPC quantity: {@code 0x} and at least one hex digit, odd lengths allowed.
+     *
+     * <p>The same expression custody-api's copy of this client uses, deliberately. The two clients
+     * are separate on purpose and nine lines of quantity parsing is the acknowledged cost of that,
+     * but the two should at least agree on what a malformed answer from the node is.
+     */
+    private static final Pattern QUANTITY = Pattern.compile("^0x[0-9a-fA-F]+$");
+
+    /**
      * What a node says when it already has these exact bytes.
      *
      * <p>Not an error, and the whole reason resending is safe. The broadcast retry job exists to
@@ -229,12 +238,29 @@ public class EthereumRpc {
         return HEX.matcher(hex).matches() ? Numeric.hexStringToByteArray(hex) : new byte[0];
     }
 
+    /**
+     * Reads a JSON-RPC quantity: {@code 0x} and then hex.
+     *
+     * <p><b>The format is checked here rather than left to the decoder.</b>
+     * {@code Numeric.decodeQuantity} validates the {@code 0x} prefix and a length over two, then
+     * hands the rest to {@code BigInteger}. So {@code "0xzz"} clears its validation and comes back
+     * out as {@code NumberFormatException}, which is not a {@code MessageDecodingException} and was
+     * not caught — the same malformed reply that custody-api reports as "the chain gave a bad
+     * answer" escaped from here as an unlabelled parsing failure. Two services facing the same node
+     * should not have two stories about what a bad answer from it looks like.
+     *
+     * @throws RpcException if the value is absent or is not a hex quantity
+     */
     private static BigInteger quantity(JsonNode node) {
         if (node.isMissingNode() || node.isNull()) {
             throw new RpcException("the node returned no value where a quantity was expected");
         }
+        String text = node.asText();
+        if (!QUANTITY.matcher(text).matches()) {
+            throw new RpcException("the node returned a malformed quantity");
+        }
         try {
-            return Numeric.decodeQuantity(node.asText());
+            return Numeric.decodeQuantity(text);
         } catch (MessageDecodingException malformed) {
             throw new RpcException("the node returned a malformed quantity", malformed);
         }
