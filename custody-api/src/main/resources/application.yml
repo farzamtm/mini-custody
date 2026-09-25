@@ -136,10 +136,18 @@ chain:
   batch-size: 100
   # Bounded, because the watcher holds a database transaction open across it.
   rpc-timeout: 5s
-  # How long a withdrawal may sit in BROADCAST with no receipt before
-  # reconciliation mentions it. Not a failure — the signer resends on its own
+  # How long a withdrawal may sit still before reconciliation mentions it, in
+  # either of the two places one can stall.
+  #
+  # In BROADCAST with no receipt: not a failure — the signer resends on its own
   # timer — but an unmined transaction this old is something a person should see,
   # because nothing in this system reprices one.
+  #
+  # In APPROVED and never broadcast: more serious, because nothing retries at
+  # all. Either the outbox never published the event or the signer dead-lettered
+  # it, and the client's funds are held the whole time. Ten minutes is very
+  # generous for a step that normally takes about a second, which is the right
+  # direction to be wrong in for a report a person reads.
   stuck-after: 10m
   watcher:
     # The timer. Off in tests that drive the watcher themselves, so they can

@@ -16,12 +16,14 @@ import java.util.Optional;
  * @param checkedAt when the run finished
  * @param confirmedChecked how many settled withdrawals were compared against the chain
  * @param inFlightChecked how many broadcast withdrawals were looked at
+ * @param approvedChecked how many approved-but-unbroadcast withdrawals were looked at. Free, unlike
+ *     the other two: there is no transaction to ask the chain about yet, which is the problem
  * @param hotWalletBalanceWei what the signer's wallet holds on chain, if an address is configured.
  *     Reported, never asserted on — see {@link Reconciler} for why it cannot be reconciled until
  *     deposits are observed on chain rather than fabricated
  * @param discrepancies what disagreed, worst first
  */
-public record ReconciliationReport(Instant checkedAt, int confirmedChecked, int inFlightChecked,
+public record ReconciliationReport(Instant checkedAt, int confirmedChecked, int inFlightChecked, int approvedChecked,
         Optional<BigInteger> hotWalletBalanceWei, List<Discrepancy> discrepancies) {
 
     /**

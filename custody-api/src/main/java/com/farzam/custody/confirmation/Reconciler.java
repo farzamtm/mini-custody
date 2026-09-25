@@ -26,6 +26,12 @@ import org.springframework.transaction.annotation.Transactional;
  * written by somebody's afternoon in {@code psql} — none of those produce an event anybody handles.
  * They produce a ledger that disagrees with the world, silently, until somebody asks.
  *
+ * <p><b>Two of the checks are about the chain disagreeing, and two are about nothing happening.</b>
+ * A settled withdrawal the chain will not vouch for is a contradiction. A withdrawal that has sat in
+ * APPROVED or BROADCAST past {@code chain.stuck-after} is not — the ledger and the chain agree
+ * perfectly that nothing has happened, which is the problem. Both kinds are worth the same report
+ * because both end with a client's money held and nobody acting.
+ *
  * <p><b>It reads and reports; it does not repair.</b> Nothing here writes to the ledger, and that is
  * deliberate rather than unfinished. Every finding below has more than one possible cause and the
  * right remedy depends on which — a settlement with no receipt behind it might want a reversing
@@ -69,6 +75,7 @@ public class Reconciler {
     @Transactional(readOnly = true)
     public ReconciliationReport reconcile() {
         List<Discrepancy> found = new ArrayList<>();
+        Instant stuckBefore = Instant.now().minus(properties.stuckAfter());
 
         List<Withdrawal> confirmed = withdrawals.findByStatus(WithdrawalStatus.CONFIRMED);
         for (Withdrawal withdrawal : confirmed) {
@@ -76,15 +83,20 @@ public class Reconciler {
         }
 
         List<Withdrawal> inFlight = withdrawals.findByStatus(WithdrawalStatus.BROADCAST);
-        Instant stuckBefore = Instant.now().minus(properties.stuckAfter());
         for (Withdrawal withdrawal : inFlight) {
             checkStillMoving(withdrawal, stuckBefore, found);
+        }
+
+        List<Withdrawal> approved = withdrawals.findByStatus(WithdrawalStatus.APPROVED);
+        for (Withdrawal withdrawal : approved) {
+            checkStillBeingSigned(withdrawal, stuckBefore, found);
         }
 
         return new ReconciliationReport(
                 Instant.now(),
                 confirmed.size(),
                 inFlight.size(),
+                approved.size(),
                 hotWalletBalance(),
                 List.copyOf(found));
     }
@@ -148,6 +160,42 @@ public class Reconciler {
                         Discrepancy.Kind.BROADCAST_BUT_NOT_MINED,
                         "broadcast more than " + properties.stuckAfter() + " ago and the chain has no "
                                 + "receipt; the signer resends, but it never reprices"));
+    }
+
+    /**
+     * A withdrawal that has been approved and never left. Is anything still working on it?
+     *
+     * <p>No chain call, because there is no transaction to ask about — and that is precisely the
+     * condition being reported. Everything else here compares the ledger against the chain; this one
+     * compares the ledger against the clock, because the failure is that nothing ever reached the
+     * chain at all.
+     *
+     * <p><b>Why this needs checking rather than being someone else's problem.</b> The path from
+     * APPROVED to BROADCAST is two hops with no retry of last resort behind either. The outbox relay
+     * halts its batch on a failed send, so one unsendable row holds up everything behind it. The
+     * signer's listener makes live JSON-RPC calls inside its transaction and gets three attempts over
+     * about a second and a half before the message is dead-lettered, and nothing consumes that topic.
+     * Neither failure emits anything, and the client's funds are held throughout — so without this,
+     * the one report that exists to answer "is anything stuck?" returned a clean bill of health while
+     * a balance sat locked up indefinitely.
+     *
+     * <p>Reusing {@code chain.stuck-after} rather than adding a second budget. The two stalls it now
+     * governs have very different normal latencies — signing takes about a second, mining takes as
+     * long as it takes — so a single threshold is generous for this one. Generous is the right
+     * direction: this is a report a person reads, and a second knob to tune is a second knob to get
+     * wrong.
+     */
+    private void checkStillBeingSigned(Withdrawal withdrawal, Instant stuckBefore, List<Discrepancy> found) {
+        if (!withdrawal.getUpdatedAt().isBefore(stuckBefore)) {
+            return;
+        }
+        found.add(
+                new Discrepancy(
+                        withdrawal.getId(),
+                        Discrepancy.Kind.APPROVED_BUT_NEVER_SIGNED,
+                        "approved more than " + properties.stuckAfter() + " ago and never broadcast; "
+                                + "either the outbox did not publish it or the signer dead-lettered it, "
+                                + "and nothing retries either on its own"));
     }
 
     /**

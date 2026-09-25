@@ -140,6 +140,10 @@ class ConfirmationApiIntegrationTest extends AbstractChainTest {
         // A count rather than just `agrees`, because a run that checked nothing also agrees, and the
         // two mean entirely different things.
         assertThat(result).bodyJson().extractingPath("$.confirmedChecked").asNumber().isNotNull();
+        assertThat(result).bodyJson().extractingPath("$.inFlightChecked").asNumber().isNotNull();
+        // All three buckets cross the wire. The contract marks approvedChecked required, so a client
+        // that reads it can tell "no withdrawal is stranded" from "nothing was looked at".
+        assertThat(result).bodyJson().extractingPath("$.approvedChecked").asNumber().isNotNull();
         assertThat(result).bodyJson().extractingPath("$.discrepancies").isNotNull();
         assertThat(withdrawal.getId()).isNotNull();
     }
