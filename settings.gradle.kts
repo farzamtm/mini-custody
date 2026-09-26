@@ -1,6 +1,17 @@
 // Gradle reads this file FIRST, before any build.gradle.kts.
 // It defines the shape of the build: what the root project is called
 // and which subprojects (modules) belong to it.
+
+plugins {
+    // Teaches Gradle where to fetch a JDK when the toolchain the build asks for
+    // (25, see build.gradle.kts) is not installed. Without a toolchain
+    // repository Gradle can only use a JDK it finds locally and otherwise fails
+    // with "Toolchain download repositories have not been configured", so the
+    // build works on a machine whose only JDK is whatever `brew install java`
+    // or the CI image happened to give it.
+    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+}
+
 rootProject.name = "mini-custody"
 
 include(

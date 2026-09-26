@@ -124,7 +124,8 @@ made yet.
 
 ## Running it
 
-Requires JDK 25 and Docker.
+Requires Docker and a JDK. The build compiles against 25; if that is not the JDK on
+your `PATH`, Gradle finds an installed one or downloads it, so no `JAVA_HOME` juggling.
 
 ```bash
 docker compose up -d      # Postgres, Kafka (KRaft), Anvil
