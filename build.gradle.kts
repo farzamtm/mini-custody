@@ -68,8 +68,10 @@ subprojects {
 
     java {
         // A toolchain pins the JDK used to compile and test, independently of
-        // whatever `java` happens to be on your PATH (yours is 27).
-        // Gradle finds the Homebrew JDK 25 automatically, or downloads one.
+        // whatever `java` happens to be on your PATH. Gradle uses a locally
+        // installed JDK 25 if it can find one and downloads one otherwise —
+        // the resolver that makes the download possible is the foojay plugin
+        // in settings.gradle.kts.
         toolchain {
             languageVersion = JavaLanguageVersion.of(25)
         }
