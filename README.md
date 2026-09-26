@@ -127,6 +127,11 @@ made yet.
 Requires Docker and a JDK. The build compiles against 25; if that is not the JDK on
 your `PATH`, Gradle finds an installed one or downloads it, so no `JAVA_HOME` juggling.
 
+One case the toolchain cannot rescue: if `JAVA_HOME` is *set* but points at a directory
+that is gone — what Homebrew leaves behind when it upgrades a JDK out from under you —
+the `gradlew` script refuses to start and Gradle never runs at all. Unset it, or point it
+at a JDK that exists.
+
 ```bash
 docker compose up -d      # Postgres, Kafka (KRaft), Anvil
 ./gradlew build           # compiles and runs the tests
@@ -136,6 +141,11 @@ docker compose up -d      # Postgres, Kafka (KRaft), Anvil
 `bootRun` starts with the `dev` profile, which is what maps `POST /dev/deposits` — a
 local instance with no way to put money into it is not much use. A real deployment sets
 its own profile and the bean is never created, so the path does not exist.
+
+The profile is set as a task argument, and `--args=` on the command line *replaces* those
+rather than adding to them — so `--args='--server.port=8081'` also turns the `dev` profile
+off, and `/dev/deposits` starts returning 404. Pass the port as `SERVER_PORT=8081` instead
+if something else already holds 8080.
 
 The whole flow against a running instance. It is not a single paste: the approval
 succeeds, and then the signer refuses it until two key pairs exist and both services
@@ -193,13 +203,29 @@ what was sent.
 
 The signer now consumes the event and still refuses it, until Alice's key is in *its*
 configuration. It also needs a key pair of its own, so `custody-api` can tell a real
-result from a forged one:
+result from a forged one — plus a master key to unseal wallet keys with, and the one hot
+wallet it is allowed to sign from. None of those four has a default: each missing one is
+a startup failure naming exactly what is absent, because a signer that boots without its
+keys is one that finds out while somebody is waiting for money.
 
 ```bash
 openssl genpkey -algorithm ed25519 -out /tmp/signer-results.pem
 RESULTS_SEED=$(openssl pkey -in /tmp/signer-results.pem -outform DER | tail -c 32 | base64)
 RESULTS_PUBKEY=$(openssl pkey -in /tmp/signer-results.pem -pubout -outform DER | tail -c 32 | base64)
 
+# Stand-in for the KMS: AES-256, so 32 bytes. Keep it — the wallet key is sealed
+# under it, and a fresh one cannot open what the old one wrapped.
+MASTER_KEY=$(openssl rand -base64 32)
+
+# Anvil's first account. The private key is only read on the first boot of a fresh
+# database; after that it is sealed in `wallet_keys` and the variable is a copy of a
+# secret with no reader, so drop it.
+HOT_ADDR=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+HOT_PK=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+
+SIGNER_MASTER_KEY=$MASTER_KEY \
+SIGNER_HOT_WALLET_ADDRESS=$HOT_ADDR \
+SIGNER_HOT_WALLET_PRIVATE_KEY=$HOT_PK \
 SIGNER_POLICY_TRUSTED_APPROVERS_0_ID=$APPROVER \
 SIGNER_POLICY_TRUSTED_APPROVERS_0_PUBLIC_KEY=$PUBKEY \
 SIGNER_RESULTS_SIGNING_KEY=$RESULTS_SEED \
