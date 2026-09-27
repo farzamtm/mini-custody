@@ -1,3 +1,13 @@
+# 8090 rather than 8080. The default is the single most contested port on a
+# developer's machine — another service already holding it is the normal case,
+# not the exception, and the failure is a stack trace at startup rather than
+# anything a reader connects to a port. 8090 and the signer's 8091 are one
+# adjacent pair, well clear of the 8080-8081 range other tools reach for first.
+# `SERVER_PORT=... ./gradlew :custody-api:bootRun` still overrides it; see the
+# README for why that spelling and not `--args`.
+server:
+  port: 8090
+
 spring:
   application:
     name: custody-api

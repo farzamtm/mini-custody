@@ -27,9 +27,9 @@ spring:
 # it has no HTTP server at all. Actuator is still worth having for its health
 # indicators, which a container runtime can read from the JMX endpoint or from
 # a sidecar; the port below only takes effect if a web starter is ever added,
-# and is kept off 8080 so both services can run on one laptop.
+# and is kept off custody-api's 8090 so both services can run on one laptop.
 server:
-  port: 8081
+  port: 8091
 
 management:
   endpoints:
