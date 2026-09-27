@@ -177,9 +177,11 @@ is a change that belongs next door.
 | `custody-api` | Clients, the double-entry ledger, withdrawals, approvals, the REST API. |
 | `signer` | Wallet keys. The only component that can sign. Has no web starter, and must not gain one. |
 
-Milestone status lives in the README's Milestones table. M0 to M7 have all landed;
-anything from here is new work, and whatever defines it gets a row in that table
-and is ticked by the pull request that finishes it.
+Milestone status lives in the Milestones table in `docs/milestones.md`, which also
+holds the list of what a production system would do differently. M0 to M7 have all
+landed; anything from here is new work, and whatever defines it gets a row in that
+table and is ticked by the pull request that finishes it. Closing one of the gaps in
+that same file means striking it from the list in the same pull request.
 
 ## Running it locally
 

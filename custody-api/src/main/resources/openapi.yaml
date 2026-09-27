@@ -33,7 +33,7 @@ info:
     url: https://opensource.org/licenses/MIT
 
 servers:
-  - url: http://localhost:8080
+  - url: http://localhost:8090
     description: Local development
 
 tags:

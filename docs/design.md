@@ -276,7 +276,7 @@ printf '{"aggregateId":"%s","eventId":"%s","eventType":"withdrawal.signing-faile
   | docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh \
       --bootstrap-server localhost:9092 --topic signer.results.v1
 
-curl -s localhost:8080/v1/accounts/$ACCOUNT   # unchanged — nothing came back
+curl -s localhost:8090/v1/accounts/$ACCOUNT   # unchanged — nothing came back
 ```
 
 Leave `CUSTODY_SIGNER_RESULTS_PUBLIC_KEY` out of custody-api's configuration entirely and
