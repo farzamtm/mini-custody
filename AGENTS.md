@@ -193,6 +193,6 @@ docker compose up -d      # Postgres, Kafka (KRaft), Anvil
 ```
 
 `bootRun` uses the `dev` profile, which is what maps `POST /dev/deposits` and
-`POST /dev/withdrawals/{id}/approve`. The README has a full deposit → whitelist →
-withdraw → approve walk-through worth running before claiming a change works end
-to end.
+`POST /dev/withdrawals/{id}/approve`. [docs/running.md](docs/running.md) has a full
+deposit → whitelist → withdraw → approve walk-through worth running before claiming a
+change works end to end.
