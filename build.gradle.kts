@@ -21,7 +21,7 @@ plugins {
 
     // Turns custody-api/src/main/resources/openapi.yaml into the interfaces the
     // controllers implement. Applied in the module that has a contract.
-    id("org.openapi.generator") version "7.14.0" apply false
+    id("org.openapi.generator") version "7.25.0" apply false
 }
 
 // Bootstrap classes are not worth testing, and leaving them in the denominator
