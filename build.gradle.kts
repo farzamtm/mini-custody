@@ -12,8 +12,8 @@ plugins {
 
     // Quality and security tooling. Applied to every module in `subprojects`
     // below, so `./gradlew check` runs the same gates CI runs.
-    id("com.diffplug.spotless") version "8.10.2" apply false
-    id("com.github.spotbugs") version "6.5.11" apply false
+    id("com.diffplug.spotless") version "8.10.3" apply false
+    id("com.github.spotbugs") version "6.5.12" apply false
 
     // Produces a CycloneDX SBOM of the resolved runtime classpath. CI feeds it
     // to Trivy: Gradle has no lockfile a scanner could read on its own.
@@ -21,7 +21,7 @@ plugins {
 
     // Turns custody-api/src/main/resources/openapi.yaml into the interfaces the
     // controllers implement. Applied in the module that has a contract.
-    id("org.openapi.generator") version "7.14.0" apply false
+    id("org.openapi.generator") version "7.25.0" apply false
 }
 
 // Bootstrap classes are not worth testing, and leaving them in the denominator
