@@ -12,16 +12,16 @@ plugins {
 
     // Quality and security tooling. Applied to every module in `subprojects`
     // below, so `./gradlew check` runs the same gates CI runs.
-    id("com.diffplug.spotless") version "8.10.2" apply false
-    id("com.github.spotbugs") version "6.5.11" apply false
+    id("com.diffplug.spotless") version "8.10.4" apply false
+    id("com.github.spotbugs") version "6.5.13" apply false
 
     // Produces a CycloneDX SBOM of the resolved runtime classpath. CI feeds it
     // to Trivy: Gradle has no lockfile a scanner could read on its own.
-    id("org.cyclonedx.bom") version "3.4.1"
+    id("org.cyclonedx.bom") version "3.5.1"
 
     // Turns custody-api/src/main/resources/openapi.yaml into the interfaces the
     // controllers implement. Applied in the module that has a contract.
-    id("org.openapi.generator") version "7.14.0" apply false
+    id("org.openapi.generator") version "7.26.0" apply false
 }
 
 // Bootstrap classes are not worth testing, and leaving them in the denominator
@@ -177,8 +177,8 @@ subprojects {
         // on the test classpath too: the annotation has CLASS retention, so
         // javac reads it back out of the main class files when compiling tests
         // and warns — fatally, under -Werror — if it cannot resolve it.
-        "compileOnly"("com.github.spotbugs:spotbugs-annotations:4.10.4")
-        "testCompileOnly"("com.github.spotbugs:spotbugs-annotations:4.10.4")
+        "compileOnly"("com.github.spotbugs:spotbugs-annotations:4.10.5")
+        "testCompileOnly"("com.github.spotbugs:spotbugs-annotations:4.10.5")
     }
 
     tasks.withType<com.github.spotbugs.snom.SpotBugsTask> {
