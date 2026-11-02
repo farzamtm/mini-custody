@@ -35,7 +35,7 @@ dependencies {
     // What crypto is used for is the part nobody should hand-roll: secp256k1
     // ECDSA with RFC 6979 deterministic `k`, and the RLP encoding of an
     // EIP-1559 transaction. A bug in either is a lost key or a lost payment.
-    implementation("org.web3j:crypto:6.0.0")
+    implementation("org.web3j:crypto:6.1.0")
 
     // web3j 6.0.0 resolves BouncyCastle 1.80, which has three advisories with
     // released fixes — two CRITICAL — so the dependency gate rejects it, and
